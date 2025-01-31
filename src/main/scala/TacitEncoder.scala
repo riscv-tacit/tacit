@@ -187,7 +187,7 @@ class TracePacketizer(val coreParams: TraceCoreParams) extends Module {
   }
 }
 
-class TacitEncoder(override val coreParams: TraceCoreParams, val bufferDepth: Int)(implicit p: Parameters) 
+class TacitEncoder(override val coreParams: TraceCoreParams, val bufferDepth: Int, val coreStages: Int)(implicit p: Parameters) 
     extends LazyTraceEncoder(coreParams)(p) {
   override lazy val module = new TacitEncoderModule(this)
 }
@@ -195,10 +195,7 @@ class TacitEncoder(override val coreParams: TraceCoreParams, val bufferDepth: In
 class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(outer) {
 
   val MAX_DELTA_TIME_COMP = 0xCF // 63, 6 bits
-
-  // when (io.stall) {
-  //   printf("TraceEncoder stall detected\n")
-  // }
+  def stallThreshold(count: UInt) = count >= (outer.bufferDepth - outer.coreStages).U
 
   // states
   val sIdle :: sSync :: sData :: Nil = Enum(3)
@@ -206,13 +203,14 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   val enabled = RegInit(false.B)
   val stall = Wire(Bool())
   val prev_time = Reg(UInt(outer.coreParams.xlen.W))
+
   // pipeline of ingress data
   val ingress_0 = RegInit(0.U.asTypeOf(new TraceCoreInterface(outer.coreParams)))
   val ingress_1 = RegInit(0.U.asTypeOf(new TraceCoreInterface(outer.coreParams)))
 
   // shift every cycle, if not stalled
   val pipeline_advance = Wire(Bool())
-  pipeline_advance := !stall && io.in.group(0).iretire === 1.U
+  pipeline_advance := io.in.group(0).iretire === 1.U
   when (pipeline_advance) {
     ingress_0 := io.in
     ingress_1 := ingress_0
@@ -230,6 +228,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   val time_buffer = Module(new Queue(Vec(time_encoder.maxNumBytes, UInt(8.W)), outer.bufferDepth))
   val byte_buffer = Module(new Queue(UInt(8.W), outer.bufferDepth)) // buffer compressed packet or full header
   val metadata_buffer = Module(new Queue(UInt(metadataWidth.W), outer.bufferDepth))
+  
   // intermediate varlen encoder signals
   val full_trap_addr      = Wire(Vec(trap_addr_encoder.maxNumBytes, UInt(8.W)))
   val trap_addr_num_bytes = Wire(UInt(log2Ceil(trap_addr_encoder.maxNumBytes).W))
@@ -283,8 +282,8 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   time_buffer.io.enq.bits := full_time
   time_buffer.io.enq.valid := !is_compressed && packet_valid
 
-  // stall if any buffer is full
-  stall := !target_addr_buffer.io.enq.ready || !time_buffer.io.enq.ready || !byte_buffer.io.enq.ready
+  // stall if any buffer is almost full
+  stall := stallThreshold(trap_addr_buffer.io.count) || stallThreshold(target_addr_buffer.io.count) || stallThreshold(time_buffer.io.count) || stallThreshold(byte_buffer.io.count)
   io.stall := stall
   
   val sent = RegInit(false.B)
