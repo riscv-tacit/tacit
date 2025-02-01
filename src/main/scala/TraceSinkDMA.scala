@@ -9,7 +9,7 @@ import freechips.rocketchip.subsystem._
 import freechips.rocketchip.prci._
 import freechips.rocketchip.regmapper.{RegField, RegFieldDesc}
 import freechips.rocketchip.tile._
-
+import shuttle.common.{ShuttleTile, ShuttleTileAttachParams}
 import freechips.rocketchip.trace._
 
 case object TraceSinkDMAKey extends Field[Option[Int]](None)
@@ -151,6 +151,17 @@ class WithTraceSinkDMA(targetId: Int = 1) extends Config((site, here, up) => {
         ))(p)), targetId)))))
       )
     }
+    case tp: ShuttleTileAttachParams => {
+      val xBytes = tp.tileParams.core.xLen / 8
+      tp.copy(tileParams = tp.tileParams.copy(
+        traceParams = Some(tp.tileParams.traceParams.get.copy(buildSinks = 
+          tp.tileParams.traceParams.get.buildSinks :+ (p => 
+            (LazyModule(new TraceSinkDMA(TraceSinkDMAParams(
+            regNodeBaseAddr = 0x3010000 + tp.tileParams.tileId * 0x1000,
+            beatBytes = xBytes
+        ))(p)), targetId)))))
+      )
+    }
     case other => other
   }
 })
@@ -158,6 +169,7 @@ class WithTraceSinkDMA(targetId: Int = 1) extends Config((site, here, up) => {
 trait CanHaveTraceSinkDMA {this: BaseSubsystem with InstantiatesHierarchicalElements =>
   val traceSinkDMAs = totalTiles.values.map { t => t match {
     case r: RocketTile => r.trace_sinks.collect { case r: TraceSinkDMA => (t, r) }
+    case s: ShuttleTile => s.trace_sinks.collect { case r: TraceSinkDMA => (t, r) }
     case _ => Nil
   }}.flatten
   val mbus = locateTLBusWrapper(MBUS)

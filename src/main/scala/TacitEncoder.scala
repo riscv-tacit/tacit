@@ -298,6 +298,20 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   target_addr_encoder.io.input_valid := encode_target_addr_valid && !is_compressed && packet_valid
   time_encoder.io.input_valid := !is_compressed && packet_valid
 
+  val has_message = ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U).reduce(_ || _)
+  val msg_idx = PriorityEncoder(ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U))
+
+  val ingress_1_valid_count = PopCount(ingress_1.group.map(g => g.iretire === 1.U))
+
+  // val target_addr_msg = (ingress_1.group(0).iaddr ^ ingress_0.group(0).iaddr) >> 1.U 
+  val target_addr_msg = Mux(msg_idx === (ingress_1_valid_count - 1.U), // am I the last message?
+                            (ingress_1.group(msg_idx).iaddr ^ ingress_0.group(0).iaddr) >> 1.U,
+                            (ingress_1.group(msg_idx).iaddr ^ ingress_1.group(msg_idx + 1.U).iaddr) >> 1.U)
+
+  dontTouch(target_addr_msg)
+  dontTouch(msg_idx)
+  dontTouch(ingress_1_valid_count)
+
   // default values
   trap_addr_encoder.io.input_value := 0.U
   target_addr_encoder.io.input_value := 0.U
@@ -328,78 +342,80 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
       when (!io.control.enable) {
         state := sSync
       } .otherwise {
-        switch (ingress_1.group(0).itype) {
-          is (TraceItype.ITNothing) {
-            packet_valid := false.B
-          }
-          is (TraceItype.ITBrTaken) {
-            header_byte := HeaderByte(FullHeaderType.FTakenBranch, TrapType.TNone)
-            comp_header := CompressedHeaderType.CTB.asUInt
-            time_encoder.io.input_value := delta_time
-            prev_time := ingress_1.time
-            is_compressed := delta_time <= MAX_DELTA_TIME_COMP.U
-            packet_valid := !sent
-          }
-          is (TraceItype.ITBrNTaken) {
-            header_byte := HeaderByte(FullHeaderType.FNotTakenBranch, TrapType.TNone)
-            comp_header := CompressedHeaderType.CNT.asUInt
-            time_encoder.io.input_value := delta_time
-            prev_time := ingress_1.time
-            is_compressed := delta_time <= MAX_DELTA_TIME_COMP.U
-            packet_valid := !sent
-          }
-          is (TraceItype.ITInJump) {
-            header_byte := HeaderByte(FullHeaderType.FInfJump, TrapType.TNone)
-            comp_header := CompressedHeaderType.CIJ.asUInt
-            time_encoder.io.input_value := delta_time
-            prev_time := ingress_1.time
-            is_compressed := delta_time <= MAX_DELTA_TIME_COMP.U
-            packet_valid := !sent
-          }
-          is (TraceItype.ITUnJump) {
-            header_byte := HeaderByte(FullHeaderType.FUninfJump, TrapType.TNone)
-            time_encoder.io.input_value := delta_time 
-            prev_time := ingress_1.time
-            target_addr_encoder.io.input_value := (ingress_1.group(0).iaddr ^ ingress_0.group(0).iaddr) >> 1.U
-            encode_target_addr_valid := true.B
-            is_compressed := false.B
-            packet_valid := !sent
-          }
-          is (TraceItype.ITException) {
-            header_byte := HeaderByte(FullHeaderType.FTrap, TrapType.TException)
-            comp_header := CompressedHeaderType.CNA.asUInt
-            time_encoder.io.input_value := delta_time
-            prev_time := ingress_1.time
-            target_addr_encoder.io.input_value := (ingress_1.group(0).iaddr ^ ingress_0.group(0).iaddr) >> 1.U
-            encode_target_addr_valid := true.B
-            trap_addr_encoder.io.input_value := ingress_1.group(0).iaddr
-            encode_trap_addr_valid := true.B
-            is_compressed := false.B
-            packet_valid := !sent
-          }
-          is (TraceItype.ITInterrupt) {
-            header_byte := HeaderByte(FullHeaderType.FTrap, TrapType.TInterrupt)
-            comp_header := CompressedHeaderType.CNA.asUInt
-            time_encoder.io.input_value := delta_time
-            prev_time := ingress_1.time
-            target_addr_encoder.io.input_value := (ingress_1.group(0).iaddr ^ ingress_0.group(0).iaddr) >> 1.U
-            encode_target_addr_valid := true.B
-            trap_addr_encoder.io.input_value := ingress_1.group(0).iaddr
-            encode_trap_addr_valid := true.B
-            is_compressed := false.B
-            packet_valid := !sent
-          }
-          is (TraceItype.ITReturn) {
-            header_byte := HeaderByte(FullHeaderType.FTrap, TrapType.TReturn)
-            comp_header := CompressedHeaderType.CNA.asUInt
-            time_encoder.io.input_value := delta_time
-            prev_time := ingress_1.time
-            target_addr_encoder.io.input_value := (ingress_1.group(0).iaddr ^ ingress_0.group(0).iaddr) >> 1.U
-            encode_target_addr_valid := true.B
-            trap_addr_encoder.io.input_value := ingress_1.group(0).iaddr
-            encode_trap_addr_valid := true.B
-            is_compressed := false.B
-            packet_valid := !sent
+        when (has_message) {
+          switch (ingress_1.group(msg_idx).itype) {
+            is (TraceItype.ITNothing) {
+              packet_valid := false.B
+            }
+            is (TraceItype.ITBrTaken) {
+              header_byte := HeaderByte(FullHeaderType.FTakenBranch, TrapType.TNone)
+              comp_header := CompressedHeaderType.CTB.asUInt
+              time_encoder.io.input_value := delta_time
+              prev_time := ingress_1.time
+              is_compressed := delta_time <= MAX_DELTA_TIME_COMP.U
+              packet_valid := !sent
+            }
+            is (TraceItype.ITBrNTaken) {
+              header_byte := HeaderByte(FullHeaderType.FNotTakenBranch, TrapType.TNone)
+              comp_header := CompressedHeaderType.CNT.asUInt
+              time_encoder.io.input_value := delta_time
+              prev_time := ingress_1.time
+              is_compressed := delta_time <= MAX_DELTA_TIME_COMP.U
+              packet_valid := !sent
+            }
+            is (TraceItype.ITInJump) {
+              header_byte := HeaderByte(FullHeaderType.FInfJump, TrapType.TNone)
+              comp_header := CompressedHeaderType.CIJ.asUInt
+              time_encoder.io.input_value := delta_time
+              prev_time := ingress_1.time
+              is_compressed := delta_time <= MAX_DELTA_TIME_COMP.U
+              packet_valid := !sent
+            }
+            is (TraceItype.ITUnJump) {
+              header_byte := HeaderByte(FullHeaderType.FUninfJump, TrapType.TNone)
+              time_encoder.io.input_value := delta_time 
+              prev_time := ingress_1.time
+              target_addr_encoder.io.input_value := target_addr_msg
+              encode_target_addr_valid := true.B
+              is_compressed := false.B
+              packet_valid := !sent
+            }
+            is (TraceItype.ITException) {
+              header_byte := HeaderByte(FullHeaderType.FTrap, TrapType.TException)
+              comp_header := CompressedHeaderType.CNA.asUInt
+              time_encoder.io.input_value := delta_time
+              prev_time := ingress_1.time
+              target_addr_encoder.io.input_value := target_addr_msg
+              encode_target_addr_valid := true.B
+              trap_addr_encoder.io.input_value := ingress_1.group(msg_idx).iaddr
+              encode_trap_addr_valid := true.B
+              is_compressed := false.B
+              packet_valid := !sent
+            }
+            is (TraceItype.ITInterrupt) {
+              header_byte := HeaderByte(FullHeaderType.FTrap, TrapType.TInterrupt)
+              comp_header := CompressedHeaderType.CNA.asUInt
+              time_encoder.io.input_value := delta_time
+              prev_time := ingress_1.time
+              target_addr_encoder.io.input_value := target_addr_msg
+              encode_target_addr_valid := true.B
+              trap_addr_encoder.io.input_value := ingress_1.group(msg_idx).iaddr
+              encode_trap_addr_valid := true.B
+              is_compressed := false.B
+              packet_valid := !sent
+            }
+            is (TraceItype.ITReturn) {
+              header_byte := HeaderByte(FullHeaderType.FTrap, TrapType.TReturn)
+              comp_header := CompressedHeaderType.CNA.asUInt
+              time_encoder.io.input_value := delta_time
+              prev_time := ingress_1.time
+              target_addr_encoder.io.input_value := target_addr_msg
+              encode_target_addr_valid := true.B
+              trap_addr_encoder.io.input_value := ingress_1.group(msg_idx).iaddr
+              encode_trap_addr_valid := true.B
+              is_compressed := false.B
+              packet_valid := !sent
+            }
           }
         }
       }
