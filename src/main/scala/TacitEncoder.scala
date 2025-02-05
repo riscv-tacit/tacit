@@ -308,10 +308,6 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
                             (ingress_1.group(msg_idx).iaddr ^ ingress_0.group(0).iaddr) >> 1.U,
                             (ingress_1.group(msg_idx).iaddr ^ ingress_1.group(msg_idx + 1.U).iaddr) >> 1.U)
 
-  dontTouch(target_addr_msg)
-  dontTouch(msg_idx)
-  dontTouch(ingress_1_valid_count)
-
   // default values
   trap_addr_encoder.io.input_value := 0.U
   target_addr_encoder.io.input_value := 0.U
