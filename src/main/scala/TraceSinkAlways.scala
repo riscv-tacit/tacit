@@ -11,8 +11,6 @@ import shuttle.common.ShuttleTileAttachParams
 
 import freechips.rocketchip.trace._
 
-case object TraceSinkAlwaysKey extends Field[Option[Int]](None)
-
 class TraceSinkAlways()(implicit p: Parameters) extends LazyTraceSink {
   override lazy val module = new TraceSinkAlwaysImpl(this)
   class TraceSinkAlwaysImpl(outer: TraceSinkAlways) extends LazyTraceSinkModuleImp(outer) {

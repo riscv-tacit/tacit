@@ -4,15 +4,13 @@ import chisel3._
 import chisel3.util._
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.diplomacy._
-import org.chipsalliance.cde.config.{Parameters, Field, Config}
+import org.chipsalliance.cde.config.{Parameters, Config}
 import freechips.rocketchip.subsystem._
 import freechips.rocketchip.prci._
 import freechips.rocketchip.regmapper.{RegField, RegFieldDesc}
 import freechips.rocketchip.tile._
 import shuttle.common.{ShuttleTile, ShuttleTileAttachParams}
 import freechips.rocketchip.trace._
-
-case object TraceSinkDMAKey extends Field[Option[Int]](None)
 
 case class TraceSinkDMAParams(
   regNodeBaseAddr: BigInt,
