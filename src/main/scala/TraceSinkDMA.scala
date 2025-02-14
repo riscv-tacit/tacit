@@ -171,11 +171,11 @@ trait CanHaveTraceSinkDMA {this: BaseSubsystem with InstantiatesHierarchicalElem
     case _ => Nil
   }}.flatten
   if (traceSinkDMAs.nonEmpty) {
-    val mbus = locateTLBusWrapper(MBUS)
+    val sbus = locateTLBusWrapper(SBUS)
     traceSinkDMAs.foreach { case (t, s) =>
       t { // in the implicit clock domain of tile
-        mbus.coupleFrom(t.tileParams.baseName) { bus =>
-          bus := mbus.crossOut(s.node)(ValName("trace_sink_dma"))(AsynchronousCrossing())
+        sbus.coupleFrom(t.tileParams.baseName) { bus =>
+          bus := sbus.crossOut(s.node)(ValName("trace_sink_dma"))(AsynchronousCrossing())
         }
         t.connectTLSlave(s.regnode, t.xBytes)
       }
