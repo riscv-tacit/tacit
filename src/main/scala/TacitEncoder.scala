@@ -187,7 +187,7 @@ class TracePacketizer(val coreParams: TraceCoreParams) extends Module {
   }
 }
 
-class TacitEncoder(override val coreParams: TraceCoreParams, val bufferDepth: Int, val coreStages: Int)(implicit p: Parameters) 
+class TacitEncoder(override val coreParams: TraceCoreParams, val bufferDepth: Int, val coreStages: Int, val bpParams: TacitBPParams)(implicit p: Parameters) 
     extends LazyTraceEncoder(coreParams)(p) {
   override lazy val module = new TacitEncoderModule(this)
 }
@@ -196,6 +196,9 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
 
   val MAX_DELTA_TIME_COMP = 0xCF // 63, 6 bits
   def stallThreshold(count: UInt) = count >= (outer.bufferDepth - outer.coreStages).U
+
+  def is_bt_mode = io.control.bp_mode === 0.U
+  def is_bp_mode = io.control.bp_mode === 2.U
 
   // states
   val sIdle :: sSync :: sData :: Nil = Enum(3)
@@ -215,6 +218,16 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
     ingress_0 := io.in
     ingress_1 := ingress_0
   }
+  
+  // branch predictor
+  val bp = Module(new DSCBranchPredictor(outer.bpParams))
+  val bp_hit_count = RegInit(0.U(32.W))
+  val bp_miss_flag = RegInit(false.B)
+  val bp_flush_hit = Wire(Bool())
+  bp_flush_hit := false.B
+  bp.io.req_pc := ingress_0.group(0).iaddr
+  bp.io.update_valid := ingress_0.group(0).iretire === 1.U && pipeline_advance
+  bp.io.update_taken := ingress_0.group(0).itype === TraceItype.ITBrTaken
 
   // encoders
   val trap_addr_encoder = Module(new VarLenEncoder(outer.coreParams.iaddrWidth))
@@ -298,15 +311,22 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   target_addr_encoder.io.input_valid := encode_target_addr_valid && !is_compressed && packet_valid
   time_encoder.io.input_valid := !is_compressed && packet_valid
 
-  val has_message = ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U).reduce(_ || _)
-  val msg_idx = PriorityEncoder(ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U))
+  val ingress_0_has_message = ingress_0.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U).reduce(_ || _)
+  val ingress_0_has_branch = ingress_0.group.map(g => g.itype === TraceItype.ITBrTaken || g.itype === TraceItype.ITBrNTaken).reduce(_ || _)
+  val ingress_0_has_flush = ingress_0.group.map(g => 
+      g.itype =/= TraceItype.ITNothing && g.itype =/= TraceItype.ITBrTaken && g.itype =/= TraceItype.ITBrNTaken && 
+      g.iretire === 1.U).reduce(_ || _)
+  val ingress_0_msg_idx = PriorityEncoder(ingress_0.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U))
+  
+  val ingress_1_has_message = ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U).reduce(_ || _)
+  val ingress_1_msg_idx = PriorityEncoder(ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U))
 
   val ingress_1_valid_count = PopCount(ingress_1.group.map(g => g.iretire === 1.U))
 
   // val target_addr_msg = (ingress_1.group(0).iaddr ^ ingress_0.group(0).iaddr) >> 1.U 
-  val target_addr_msg = Mux(msg_idx === (ingress_1_valid_count - 1.U), // am I the last message?
-                            (ingress_1.group(msg_idx).iaddr ^ ingress_0.group(0).iaddr) >> 1.U,
-                            (ingress_1.group(msg_idx).iaddr ^ ingress_1.group(msg_idx + 1.U).iaddr) >> 1.U)
+  val target_addr_msg = Mux(ingress_1_msg_idx === (ingress_1_valid_count - 1.U), // am I the last message?
+                            (ingress_1.group(ingress_1_msg_idx).iaddr ^ ingress_0.group(0).iaddr) >> 1.U,
+                            (ingress_1.group(ingress_1_msg_idx).iaddr ^ ingress_1.group(ingress_1_msg_idx + 1.U).iaddr) >> 1.U)
 
   // default values
   trap_addr_encoder.io.input_value := 0.U
@@ -338,8 +358,40 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
       when (!io.control.enable) {
         state := sSync
       } .otherwise {
-        when (has_message) {
-          switch (ingress_1.group(msg_idx).itype) {
+        // ingress0 logic - branch resolution
+        when (ingress_0_has_branch) {
+          bp_hit_count := Mux(bp.io.resp && is_bp_mode, 
+                              bp_hit_count + pipeline_advance.asUInt, 
+                              0.U) // reset if responded with miss
+          bp_miss_flag := !bp.io.resp && is_bp_mode
+        }
+        when (ingress_0_has_flush) {
+          bp_flush_hit := is_bp_mode
+        }
+        // ingress1 logic - message encoding
+        when (bp_flush_hit) {
+          // reset bp hit count
+          bp_hit_count := 0.U
+          // encode hit packet
+          header_byte := HeaderByte(FullHeaderType.FTakenBranch, TrapType.TNone)
+          comp_header := CompressedHeaderType.CTB.asUInt
+          time_encoder.io.input_value := bp_hit_count
+          prev_time := Mux(sent, ingress_1.time, prev_time)
+          is_compressed := bp_hit_count <= MAX_DELTA_TIME_COMP.U
+          packet_valid := !sent && is_bp_mode
+          bp_hit_count := 0.U
+        }
+        when (bp_miss_flag) {
+          // encode miss packet
+          header_byte := HeaderByte(FullHeaderType.FNotTakenBranch, TrapType.TNone)
+          comp_header := CompressedHeaderType.CNT.asUInt
+          time_encoder.io.input_value := delta_time
+          prev_time := Mux(sent, ingress_1.time, prev_time)
+          is_compressed := delta_time <= MAX_DELTA_TIME_COMP.U
+          packet_valid := !sent && is_bp_mode
+        }
+        when (ingress_1_has_message) {
+          switch (ingress_1.group(ingress_1_msg_idx).itype) {
             is (TraceItype.ITNothing) {
               packet_valid := false.B
             }
@@ -349,7 +401,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               time_encoder.io.input_value := delta_time
               prev_time := Mux(sent, ingress_1.time, prev_time)
               is_compressed := delta_time <= MAX_DELTA_TIME_COMP.U
-              packet_valid := !sent
+              packet_valid := !sent && is_bt_mode
             }
             is (TraceItype.ITBrNTaken) {
               header_byte := HeaderByte(FullHeaderType.FNotTakenBranch, TrapType.TNone)
@@ -357,7 +409,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               time_encoder.io.input_value := delta_time
               prev_time := Mux(sent, ingress_1.time, prev_time)
               is_compressed := delta_time <= MAX_DELTA_TIME_COMP.U
-              packet_valid := !sent
+              packet_valid := !sent && is_bt_mode
             }
             is (TraceItype.ITInJump) {
               header_byte := HeaderByte(FullHeaderType.FInfJump, TrapType.TNone)
@@ -383,7 +435,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               prev_time := Mux(sent, ingress_1.time, prev_time)
               target_addr_encoder.io.input_value := target_addr_msg
               encode_target_addr_valid := true.B
-              trap_addr_encoder.io.input_value := ingress_1.group(msg_idx).iaddr
+              trap_addr_encoder.io.input_value := ingress_1.group(ingress_1_msg_idx).iaddr
               encode_trap_addr_valid := true.B
               is_compressed := false.B
               packet_valid := !sent
@@ -395,7 +447,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               prev_time := Mux(sent, ingress_1.time, prev_time)
               target_addr_encoder.io.input_value := target_addr_msg
               encode_target_addr_valid := true.B
-              trap_addr_encoder.io.input_value := ingress_1.group(msg_idx).iaddr
+              trap_addr_encoder.io.input_value := ingress_1.group(ingress_1_msg_idx).iaddr
               encode_trap_addr_valid := true.B
               is_compressed := false.B
               packet_valid := !sent
@@ -407,7 +459,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               prev_time := Mux(sent, ingress_1.time, prev_time)
               target_addr_encoder.io.input_value := target_addr_msg
               encode_target_addr_valid := true.B
-              trap_addr_encoder.io.input_value := ingress_1.group(msg_idx).iaddr
+              trap_addr_encoder.io.input_value := ingress_1.group(ingress_1_msg_idx).iaddr
               encode_trap_addr_valid := true.B
               is_compressed := false.B
               packet_valid := !sent
