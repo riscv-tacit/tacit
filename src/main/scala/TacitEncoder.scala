@@ -321,17 +321,13 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   time_encoder.io.input_valid := !is_compressed && packet_valid
 
   val ingress_0_has_message = ingress_0.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U).reduce(_ || _)
-  val ingress_0_has_branch = ingress_0.group.map(g => g.itype === TraceItype.ITBrTaken || g.itype === TraceItype.ITBrNTaken).reduce(_ || _)
-  val ingress_0_has_flush = ingress_0.group.map(g => 
-      g.itype =/= TraceItype.ITNothing && g.itype =/= TraceItype.ITBrTaken && g.itype =/= TraceItype.ITBrNTaken && 
-      g.iretire === 1.U).reduce(_ || _)
+  val ingress_0_has_branch = ingress_0.group.map(g => g.itype === TraceItype.ITBrTaken || g.itype === TraceItype.ITBrNTaken && g.iretire === 1.U).reduce(_ || _)
+  val ingress_0_has_flush = ingress_0_has_message && !ingress_0_has_branch
   val ingress_0_msg_idx = PriorityEncoder(ingress_0.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U))
   
-  val ingress_1_has_message = Mux(is_bt_mode, 
-        ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U).reduce(_ || _),
-        ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && 
-                            g.itype =/= TraceItype.ITBrTaken && g.itype =/= TraceItype.ITBrNTaken && 
-                            g.iretire === 1.U).reduce(_ || _))
+  val ingress_1_has_message = ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U).reduce(_ || _)
+  val ingress_1_has_branch = ingress_1.group.map(g => g.itype === TraceItype.ITBrTaken || g.itype === TraceItype.ITBrNTaken && g.iretire === 1.U).reduce(_ || _)
+  val ingress_1_has_packet = Mux(is_bp_mode, ingress_1_has_message && !ingress_1_has_branch, ingress_1_has_message)
   val ingress_1_msg_idx = PriorityEncoder(ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U))
 
   val ingress_1_valid_count = PopCount(ingress_1.group.map(g => g.iretire === 1.U))
@@ -385,7 +381,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
           bp_hit_count_next := 0.U
         }
         // ingress1 logic - message encoding
-        when (bp_flush_hit) {
+        when (bp_flush_hit && is_bp_mode) {
           // encode hit packet
           header_byte := HeaderByte(FullHeaderType.FTakenBranch, TrapType.TNone)
           comp_header := CompressedHeaderType.CTB.asUInt
@@ -393,7 +389,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
           is_compressed := bp_hit_count <= MAX_DELTA_TIME_COMP.U
           packet_valid := !sent && is_bp_mode
         }
-        when (bp_miss_flag) {
+        .elsewhen (bp_miss_flag && is_bp_mode) {
           // encode miss packet
           header_byte := HeaderByte(FullHeaderType.FNotTakenBranch, TrapType.TNone)
           comp_header := CompressedHeaderType.CNT.asUInt
@@ -402,7 +398,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
           is_compressed := delta_time <= MAX_DELTA_TIME_COMP.U
           packet_valid := !sent && is_bp_mode
         }
-        when (ingress_1_has_message) {
+        .elsewhen (ingress_1_has_message) {
           switch (ingress_1.group(ingress_1_msg_idx).itype) {
             is (TraceItype.ITNothing) {
               packet_valid := false.B
