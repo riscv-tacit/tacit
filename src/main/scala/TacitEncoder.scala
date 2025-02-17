@@ -221,12 +221,18 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   
   // branch predictor
   val bp = Module(new DSCBranchPredictor(outer.bpParams))
-  val bp_hit_count = RegInit(0.U(32.W))
-  val bp_miss_flag = RegInit(false.B)
+  val bp_hit_count_next = Wire(UInt(32.W))
+  val bp_hit_count = RegEnable(bp_hit_count_next, 0.U, pipeline_advance)
+  bp_hit_count_next := bp_hit_count // default behavior is to hold the value
+  val bp_miss_flag_next = Wire(Bool())
+  val bp_miss_flag = RegEnable(bp_miss_flag_next, false.B, pipeline_advance)
+  bp_miss_flag_next := false.B // default behavior is to set to false
   val bp_flush_hit = Wire(Bool())
   bp_flush_hit := false.B
   bp.io.req_pc := ingress_0.group(0).iaddr
-  bp.io.update_valid := ingress_0.group(0).iretire === 1.U && pipeline_advance
+  bp.io.update_valid := ingress_0.group(0).iretire === 1.U && 
+                        (ingress_0.group(0).itype === TraceItype.ITBrTaken || ingress_0.group(0).itype === TraceItype.ITBrNTaken) &&
+                        pipeline_advance && io.control.enable
   bp.io.update_taken := ingress_0.group(0).itype === TraceItype.ITBrTaken
 
   // encoders
@@ -263,6 +269,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   val header_byte   = Wire(UInt(8.W)) // full header
   val comp_packet   = Wire(UInt(8.W)) // compressed packet
   val comp_header   = Wire(UInt(CompressedHeaderType.getWidth.W)) // compressed header
+  val bp_hit_packet = Cat(bp_hit_count(5, 0), comp_header)
   comp_packet := Cat(delta_time(5, 0), comp_header)
 
   // packetization of buffered message
@@ -283,7 +290,9 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   metadata_buffer.io.enq.bits := metadata
   metadata_buffer.io.enq.valid := packet_valid
   // buffering compressed packet or full header depending on is_compressed
-  byte_buffer.io.enq.bits := Mux(is_compressed, comp_packet, header_byte)
+  byte_buffer.io.enq.bits := Mux(is_compressed, 
+                                  Mux(bp_flush_hit, bp_hit_packet, comp_packet),
+                                  header_byte)
   byte_buffer.io.enq.valid := packet_valid
   // trap address buffering
   trap_addr_buffer.io.enq.bits := full_trap_addr
@@ -318,7 +327,11 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
       g.iretire === 1.U).reduce(_ || _)
   val ingress_0_msg_idx = PriorityEncoder(ingress_0.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U))
   
-  val ingress_1_has_message = ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U).reduce(_ || _)
+  val ingress_1_has_message = Mux(is_bt_mode, 
+        ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U).reduce(_ || _),
+        ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && 
+                            g.itype =/= TraceItype.ITBrTaken && g.itype =/= TraceItype.ITBrNTaken && 
+                            g.iretire === 1.U).reduce(_ || _))
   val ingress_1_msg_idx = PriorityEncoder(ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U))
 
   val ingress_1_valid_count = PopCount(ingress_1.group.map(g => g.iretire === 1.U))
@@ -360,26 +373,25 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
       } .otherwise {
         // ingress0 logic - branch resolution
         when (ingress_0_has_branch) {
-          bp_hit_count := Mux(bp.io.resp && is_bp_mode, 
-                              bp_hit_count + pipeline_advance.asUInt, 
+          val taken = ingress_0.group(0).itype === TraceItype.ITBrTaken
+          bp_hit_count_next := Mux((bp.io.resp === taken) && is_bp_mode, 
+                              bp_hit_count + 1.U, 
                               0.U) // reset if responded with miss
-          bp_miss_flag := !bp.io.resp && is_bp_mode
+          bp_miss_flag_next := (bp.io.resp =/= taken) && is_bp_mode
+          bp_flush_hit := (bp.io.resp =/= taken) && is_bp_mode && bp_hit_count > 0.U
         }
-        when (ingress_0_has_flush) {
-          bp_flush_hit := is_bp_mode
+        .elsewhen (ingress_0_has_flush) { // these two conditions are mutually exclusive
+          bp_flush_hit := is_bp_mode && bp_hit_count > 0.U
+          bp_hit_count_next := 0.U
         }
         // ingress1 logic - message encoding
         when (bp_flush_hit) {
-          // reset bp hit count
-          bp_hit_count := 0.U
           // encode hit packet
           header_byte := HeaderByte(FullHeaderType.FTakenBranch, TrapType.TNone)
           comp_header := CompressedHeaderType.CTB.asUInt
           time_encoder.io.input_value := bp_hit_count
-          prev_time := Mux(sent, ingress_1.time, prev_time)
           is_compressed := bp_hit_count <= MAX_DELTA_TIME_COMP.U
           packet_valid := !sent && is_bp_mode
-          bp_hit_count := 0.U
         }
         when (bp_miss_flag) {
           // encode miss packet
