@@ -194,7 +194,7 @@ class TacitEncoder(override val coreParams: TraceCoreParams, val bufferDepth: In
 
 class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(outer) {
 
-  val MAX_DELTA_TIME_COMP = 0xCF // 63, 6 bits
+  val MAX_DELTA_TIME_COMP = 0x3F // 63, 6 bits
   def stallThreshold(count: UInt) = count >= (outer.bufferDepth - outer.coreStages).U
 
   def is_bt_mode = io.control.bp_mode === 0.U
@@ -304,7 +304,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   time_buffer.io.enq.bits := full_time
   time_buffer.io.enq.valid := !is_compressed && packet_valid
 
-  // stall if any buffer is almost full
+  // stall if any buffer is almost full TODO: optimize
   stall := stallThreshold(trap_addr_buffer.io.count) || stallThreshold(target_addr_buffer.io.count) || stallThreshold(time_buffer.io.count) || stallThreshold(byte_buffer.io.count)
   io.stall := stall
   
