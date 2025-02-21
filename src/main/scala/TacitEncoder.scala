@@ -218,22 +218,6 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
     ingress_0 := io.in
     ingress_1 := ingress_0
   }
-  
-  // branch predictor
-  val bp = Module(new DSCBranchPredictor(outer.bpParams))
-  val bp_hit_count_next = Wire(UInt(32.W))
-  val bp_hit_count = RegEnable(bp_hit_count_next, 0.U, pipeline_advance)
-  bp_hit_count_next := bp_hit_count // default behavior is to hold the value
-  val bp_miss_flag_next = Wire(Bool())
-  val bp_miss_flag = RegEnable(bp_miss_flag_next, false.B, pipeline_advance)
-  bp_miss_flag_next := false.B // default behavior is to set to false
-  val bp_flush_hit = Wire(Bool())
-  bp_flush_hit := false.B
-  bp.io.req_pc := ingress_0.group(0).iaddr
-  bp.io.update_valid := ingress_0.group(0).iretire === 1.U && 
-                        (ingress_0.group(0).itype === TraceItype.ITBrTaken || ingress_0.group(0).itype === TraceItype.ITBrNTaken) &&
-                        pipeline_advance && io.control.enable
-  bp.io.update_taken := ingress_0.group(0).itype === TraceItype.ITBrTaken
 
   // encoders
   val trap_addr_encoder = Module(new VarLenEncoder(outer.coreParams.iaddrWidth))
@@ -269,6 +253,21 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   val header_byte   = Wire(UInt(8.W)) // full header
   val comp_packet   = Wire(UInt(8.W)) // compressed packet
   val comp_header   = Wire(UInt(CompressedHeaderType.getWidth.W)) // compressed header
+  
+  // branch predictor
+  val bp = Module(new DSCBranchPredictor(outer.bpParams))
+  val bp_hit_count_next = Wire(UInt(32.W))
+  val bp_inference_valid = Wire(Bool())
+  val bp_hit_count_en = Wire(Bool())
+  val bp_hit_count = RegEnable(bp_hit_count_next, 0.U, bp_hit_count_en)
+  bp_hit_count_next := bp_hit_count // default behavior is to hold the value
+  val bp_miss_flag_next = Wire(Bool())
+  val bp_miss_flag_en = Wire(Bool())
+  val bp_miss_flag = RegEnable(bp_miss_flag_next, false.B, bp_miss_flag_en)
+  bp_miss_flag_next := false.B // default behavior is to set to false
+  val bp_flush_hit = Wire(Bool())
+  bp_flush_hit := false.B
+  
   val bp_hit_packet = Cat(bp_hit_count(5, 0), comp_header)
   comp_packet := Cat(delta_time(5, 0), comp_header)
 
@@ -320,22 +319,39 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   target_addr_encoder.io.input_valid := encode_target_addr_valid && !is_compressed && packet_valid
   time_encoder.io.input_valid := !is_compressed && packet_valid
 
+  /* 
+  - oldest instruction -
+    ingress_1_group_0
+    ingress_1_group_n
+    ingress_0_group_0
+    ingress_0_group_n
+  - youngest instruction -
+  */
   val ingress_0_has_message = ingress_0.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U).reduce(_ || _)
-  val ingress_0_has_branch = ingress_0.group.map(g => g.itype === TraceItype.ITBrTaken || g.itype === TraceItype.ITBrNTaken && g.iretire === 1.U).reduce(_ || _)
+  val ingress_0_has_branch = ingress_0.group.map(g => (g.itype === TraceItype.ITBrTaken || g.itype === TraceItype.ITBrNTaken) && g.iretire === 1.U).reduce(_ || _)
   val ingress_0_has_flush = ingress_0_has_message && !ingress_0_has_branch
   val ingress_0_msg_idx = PriorityEncoder(ingress_0.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U))
   
   val ingress_1_has_message = ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U).reduce(_ || _)
-  val ingress_1_has_branch = ingress_1.group.map(g => g.itype === TraceItype.ITBrTaken || g.itype === TraceItype.ITBrNTaken && g.iretire === 1.U).reduce(_ || _)
+  val ingress_1_has_branch = ingress_1.group.map(g => (g.itype === TraceItype.ITBrTaken || g.itype === TraceItype.ITBrNTaken) && g.iretire === 1.U).reduce(_ || _)
   val ingress_1_has_packet = Mux(is_bp_mode, ingress_1_has_message && !ingress_1_has_branch, ingress_1_has_message)
   val ingress_1_msg_idx = PriorityEncoder(ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U))
 
   val ingress_1_valid_count = PopCount(ingress_1.group.map(g => g.iretire === 1.U))
 
-  // val target_addr_msg = (ingress_1.group(0).iaddr ^ ingress_0.group(0).iaddr) >> 1.U 
   val target_addr_msg = Mux(ingress_1_msg_idx === (ingress_1_valid_count - 1.U), // am I the last message?
                             (ingress_1.group(ingress_1_msg_idx).iaddr ^ ingress_0.group(0).iaddr) >> 1.U,
                             (ingress_1.group(ingress_1_msg_idx).iaddr ^ ingress_1.group(ingress_1_msg_idx + 1.U).iaddr) >> 1.U)
+
+  // driving branch predictor signals
+  bp.io.req_pc := ingress_0.group(ingress_0_msg_idx).iaddr
+  bp_inference_valid := ingress_0.group(ingress_0_msg_idx).iretire === 1.U && 
+                        (ingress_0.group(ingress_0_msg_idx).itype === TraceItype.ITBrTaken || ingress_0.group(ingress_0_msg_idx).itype === TraceItype.ITBrNTaken) &&
+                        pipeline_advance && io.control.enable
+  bp.io.update_valid := bp_inference_valid
+  bp.io.update_taken := ingress_0.group(ingress_0_msg_idx).itype === TraceItype.ITBrTaken
+  bp_hit_count_en := pipeline_advance && io.control.enable
+  bp_miss_flag_en := pipeline_advance && io.control.enable
 
   // default values
   trap_addr_encoder.io.input_value := 0.U
@@ -369,12 +385,12 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
       } .otherwise {
         // ingress0 logic - branch resolution
         when (ingress_0_has_branch) {
-          val taken = ingress_0.group(0).itype === TraceItype.ITBrTaken
+          val taken = ingress_0.group(ingress_0_msg_idx).itype === TraceItype.ITBrTaken
           bp_hit_count_next := Mux((bp.io.resp === taken) && is_bp_mode, 
                               bp_hit_count + 1.U, 
                               0.U) // reset if responded with miss
-          bp_miss_flag_next := (bp.io.resp =/= taken) && is_bp_mode
-          bp_flush_hit := (bp.io.resp =/= taken) && is_bp_mode && bp_hit_count > 0.U
+          bp_miss_flag_next := (bp.io.resp =/= taken) && is_bp_mode 
+          bp_flush_hit := (bp.io.resp =/= taken) && is_bp_mode && bp_hit_count > 0.U 
         }
         .elsewhen (ingress_0_has_flush) { // these two conditions are mutually exclusive
           bp_flush_hit := is_bp_mode && bp_hit_count > 0.U
