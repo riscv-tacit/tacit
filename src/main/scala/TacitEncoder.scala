@@ -410,7 +410,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
           header_byte := HeaderByte(FullHeaderType.FNotTakenBranch, TrapType.TNone)
           comp_header := CompressedHeaderType.CNT.asUInt
           time_encoder.io.input_value := delta_time
-          prev_time := Mux(sent, ingress_1.time, prev_time)
+          prev_time := Mux(byte_buffer.io.enq.fire, ingress_1.time, prev_time)
           is_compressed := delta_time <= MAX_DELTA_TIME_COMP.U
           packet_valid := !sent && is_bp_mode
         }
@@ -423,7 +423,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               header_byte := HeaderByte(FullHeaderType.FTakenBranch, TrapType.TNone)
               comp_header := CompressedHeaderType.CTB.asUInt
               time_encoder.io.input_value := delta_time
-              prev_time := Mux(sent, ingress_1.time, prev_time)
+              prev_time := Mux(byte_buffer.io.enq.fire, ingress_1.time, prev_time)
               is_compressed := delta_time <= MAX_DELTA_TIME_COMP.U
               packet_valid := !sent && is_bt_mode
             }
@@ -431,7 +431,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               header_byte := HeaderByte(FullHeaderType.FNotTakenBranch, TrapType.TNone)
               comp_header := CompressedHeaderType.CNT.asUInt
               time_encoder.io.input_value := delta_time
-              prev_time := Mux(sent, ingress_1.time, prev_time)
+              prev_time := Mux(byte_buffer.io.enq.fire, ingress_1.time, prev_time)
               is_compressed := delta_time <= MAX_DELTA_TIME_COMP.U
               packet_valid := !sent && is_bt_mode
             }
@@ -439,14 +439,14 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               header_byte := HeaderByte(FullHeaderType.FInfJump, TrapType.TNone)
               comp_header := CompressedHeaderType.CIJ.asUInt
               time_encoder.io.input_value := delta_time
-              prev_time := Mux(sent, ingress_1.time, prev_time)
+              prev_time := Mux(byte_buffer.io.enq.fire, ingress_1.time, prev_time)
               is_compressed := delta_time <= MAX_DELTA_TIME_COMP.U
               packet_valid := !sent
             }
             is (TraceItype.ITUnJump) {
               header_byte := HeaderByte(FullHeaderType.FUninfJump, TrapType.TNone)
               time_encoder.io.input_value := delta_time 
-              prev_time := Mux(sent, ingress_1.time, prev_time)
+              prev_time := Mux(byte_buffer.io.enq.fire, ingress_1.time, prev_time)
               target_addr_encoder.io.input_value := target_addr_msg
               encode_target_addr_valid := true.B
               is_compressed := false.B
@@ -456,7 +456,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               header_byte := HeaderByte(FullHeaderType.FTrap, TrapType.TException)
               comp_header := CompressedHeaderType.CNA.asUInt
               time_encoder.io.input_value := delta_time
-              prev_time := Mux(sent, ingress_1.time, prev_time)
+              prev_time := Mux(byte_buffer.io.enq.fire, ingress_1.time, prev_time)
               target_addr_encoder.io.input_value := target_addr_msg
               encode_target_addr_valid := true.B
               trap_addr_encoder.io.input_value := ingress_1.group(ingress_1_msg_idx).iaddr
@@ -468,7 +468,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               header_byte := HeaderByte(FullHeaderType.FTrap, TrapType.TInterrupt)
               comp_header := CompressedHeaderType.CNA.asUInt
               time_encoder.io.input_value := delta_time
-              prev_time := Mux(sent, ingress_1.time, prev_time)
+              prev_time := Mux(byte_buffer.io.enq.fire, ingress_1.time, prev_time)
               target_addr_encoder.io.input_value := target_addr_msg
               encode_target_addr_valid := true.B
               trap_addr_encoder.io.input_value := ingress_1.group(ingress_1_msg_idx).iaddr
@@ -480,7 +480,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               header_byte := HeaderByte(FullHeaderType.FTrap, TrapType.TReturn)
               comp_header := CompressedHeaderType.CNA.asUInt
               time_encoder.io.input_value := delta_time
-              prev_time := Mux(sent, ingress_1.time, prev_time)
+              prev_time := Mux(byte_buffer.io.enq.fire, ingress_1.time, prev_time)
               target_addr_encoder.io.input_value := target_addr_msg
               encode_target_addr_valid := true.B
               trap_addr_encoder.io.input_value := ingress_1.group(ingress_1_msg_idx).iaddr
