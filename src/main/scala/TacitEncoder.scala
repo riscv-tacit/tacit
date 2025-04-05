@@ -197,8 +197,13 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   val MAX_DELTA_TIME_COMP = 0x3F // 63, 6 bits
   def stallThreshold(count: UInt) = count >= (outer.bufferDepth - outer.coreStages).U
 
+  // mode of operation
+  // 0: branch target only
+  // 1: branch prediction and skip jump
+  // 2: branch prediction and don't skip jump
+
   def is_bt_mode = io.control.bp_mode === 0.U
-  def is_bp_mode = io.control.bp_mode === 2.U
+  def is_bp_mode = io.control.bp_mode === 2.U 
 
   // states
   val sIdle :: sSync :: sData :: Nil = Enum(3)
@@ -329,7 +334,8 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   */
   val ingress_0_has_message = ingress_0.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U).reduce(_ || _)
   val ingress_0_has_branch = ingress_0.group.map(g => (g.itype === TraceItype.ITBrTaken || g.itype === TraceItype.ITBrNTaken) && g.iretire === 1.U).reduce(_ || _)
-  val ingress_0_has_flush = ingress_0_has_message && !ingress_0_has_branch
+  val ingress_0_has_ij = ingress_0.group.map(g => (g.itype === TraceItype.ITInJump) && g.iretire === 1.U).reduce(_ || _)
+  val ingress_0_has_flush = ingress_0_has_message && !ingress_0_has_branch && !ingress_0_has_ij
   val ingress_0_msg_idx = PriorityEncoder(ingress_0.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U))
   
   val ingress_1_has_message = ingress_1.group.map(g => g.itype =/= TraceItype.ITNothing && g.iretire === 1.U).reduce(_ || _)
@@ -441,7 +447,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               time_encoder.io.input_value := delta_time
               prev_time := Mux(byte_buffer.io.enq.fire, ingress_1.time, prev_time)
               is_compressed := delta_time <= MAX_DELTA_TIME_COMP.U
-              packet_valid := !sent
+              packet_valid := !sent && is_bt_mode
             }
             is (TraceItype.ITUnJump) {
               header_byte := HeaderByte(FullHeaderType.FUninfJump, TrapType.TNone)
