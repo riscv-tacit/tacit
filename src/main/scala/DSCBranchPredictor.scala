@@ -26,7 +26,7 @@ class DSCBranchPredictor(params: TacitBPParams) extends Module {
     val update_taken = Input(Bool())
   })
   require(isPow2(params.n_entries), "n_entries must be a power of 2")
-  // def hash(pc: UInt): UInt = { pc(log2Ceil(params.n_entries), 1) }
+  
   def hash(pc: UInt): UInt = { (pc >> 1.U) % params.n_entries.U }
   def judge(counter: UInt): Bool = { counter === CounterState.STRONG_TAKEN || counter === CounterState.WEAK_TAKEN}
   def update(counter: UInt, taken: Bool): Unit = {
