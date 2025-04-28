@@ -11,7 +11,7 @@ import freechips.rocketchip.regmapper.{RegField, RegFieldDesc}
 import freechips.rocketchip.tile._
 import shuttle.common.{ShuttleTile, ShuttleTileAttachParams}
 import freechips.rocketchip.trace._
-import testchipip.soc.{SubsystemInjector, SubsystemInjectorKey}
+// import testchipip.soc.{SubsystemInjector, SubsystemInjectorKey}
 
 case class TraceSinkDMAParams(
   regNodeBaseAddr: BigInt,
@@ -163,20 +163,17 @@ class WithTraceSinkDMA(targetId: Int = 1) extends Config((site, here, up) => {
     }
     case other => other
   }
-  case SubsystemInjectorKey => up(SubsystemInjectorKey) + TraceSinkDMAInjector
+  // case SubsystemInjectorKey => up(SubsystemInjectorKey) + TraceSinkDMAInjector
 })
 
-case object TraceSinkDMAInjector extends SubsystemInjector((p, baseSubsystem) => {
-  require(baseSubsystem.isInstanceOf[BaseSubsystem with InstantiatesHierarchicalElements])
-  val hierarchicalSubsystem = baseSubsystem.asInstanceOf[BaseSubsystem with InstantiatesHierarchicalElements]
-  implicit val q: Parameters = p
-  val traceSinkDMAs = hierarchicalSubsystem.totalTiles.values.map { t => t match {
+trait CanHaveTraceSinkDMA {this: BaseSubsystem with InstantiatesHierarchicalElements =>
+  val traceSinkDMAs = totalTiles.values.map { t => t match {
     case r: RocketTile => r.trace_sinks.collect { case r: TraceSinkDMA => (t, r) }
     case s: ShuttleTile => s.trace_sinks.collect { case r: TraceSinkDMA => (t, r) }
     case _ => Nil
   }}.flatten
   if (traceSinkDMAs.nonEmpty) {
-    val sbus = baseSubsystem.locateTLBusWrapper(SBUS)
+    val sbus = locateTLBusWrapper(SBUS)
     traceSinkDMAs.foreach { case (t, s) =>
       t { // in the implicit clock domain of tile
         sbus.coupleFrom(t.tileParams.baseName) { bus =>
@@ -186,4 +183,4 @@ case object TraceSinkDMAInjector extends SubsystemInjector((p, baseSubsystem) =>
       }
     }
   }
-})
+}
