@@ -24,7 +24,7 @@ class TraceSinkDMA(params: TraceSinkDMAParams)(implicit p: Parameters) extends L
 
   val device = new SimpleDevice("trace-sink-dma", Seq("ucbbar,trace0"))
   val regnode = TLRegisterNode(
-    address = Seq(AddressSet(params.regNodeBaseAddr, 0xFF)),
+    address = Seq(AddressSet(params.regNodeBaseAddr, 0xFFFF)),
     device = device,
     beatBytes = params.beatBytes
   )
@@ -145,18 +145,18 @@ class WithTraceSinkDMA(targetId: Int = 1) extends Config((site, here, up) => {
         traceParams = Some(tp.tileParams.traceParams.get.copy(buildSinks = 
           tp.tileParams.traceParams.get.buildSinks :+ (p => 
             (LazyModule(new TraceSinkDMA(TraceSinkDMAParams(
-            regNodeBaseAddr = 0x3010000 + tp.tileParams.tileId * 0x1000,
+            regNodeBaseAddr = 0x3100000 + tp.tileParams.tileId * 0x10000,
             beatBytes = xBytes
         ))(p)), targetId)))))
       )
     }
     case tp: ShuttleTileAttachParams => {
-      val xBytes = tp.tileParams.core.xLen / 8
+      val xBytes = tp.tileParams.tileBeatBytes
       tp.copy(tileParams = tp.tileParams.copy(
         traceParams = Some(tp.tileParams.traceParams.get.copy(buildSinks = 
           tp.tileParams.traceParams.get.buildSinks :+ (p => 
             (LazyModule(new TraceSinkDMA(TraceSinkDMAParams(
-            regNodeBaseAddr = 0x3010000 + tp.tileParams.tileId * 0x1000,
+            regNodeBaseAddr = 0x3100000 + tp.tileParams.tileId * 0x10000,
             beatBytes = xBytes
         ))(p)), targetId)))))
       )
