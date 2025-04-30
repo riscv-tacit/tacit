@@ -151,13 +151,13 @@ class WithTraceSinkDMA(targetId: Int = 1) extends Config((site, here, up) => {
       )
     }
     case tp: ShuttleTileAttachParams => {
-      val xBytes = tp.tileParams.tileBeatBytes
+      val beatBytes = tp.tileParams.tileBeatBytes
       tp.copy(tileParams = tp.tileParams.copy(
         traceParams = Some(tp.tileParams.traceParams.get.copy(buildSinks = 
           tp.tileParams.traceParams.get.buildSinks :+ (p => 
             (LazyModule(new TraceSinkDMA(TraceSinkDMAParams(
             regNodeBaseAddr = 0x3100000 + tp.tileParams.tileId * 0x10000,
-            beatBytes = xBytes
+            beatBytes = beatBytes
         ))(p)), targetId)))))
       )
     }
@@ -179,7 +179,8 @@ trait CanHaveTraceSinkDMA {this: BaseSubsystem with InstantiatesHierarchicalElem
         sbus.coupleFrom(t.tileParams.baseName) { bus =>
           bus := sbus.crossOut(s.node)(ValName("trace_sink_dma"))(AsynchronousCrossing())
         }
-        t.connectTLSlave(s.regnode, t.xBytes)
+        // t.connectTLSlave(s.regnode, t.xBytes)
+        t.connectMMIORaw(s.regnode)
       }
     }
   }
