@@ -173,7 +173,7 @@ trait CanHaveTraceSinkDMA {this: BaseSubsystem with InstantiatesHierarchicalElem
     case _ => Nil
   }}.flatten
   if (traceSinkDMAs.nonEmpty) {
-    val sbus = locateTLBusWrapper(SBUS)
+    val sbus = locateTLBusWrapper(MBUS)
     traceSinkDMAs.foreach { case (t, s) =>
       t { // in the implicit clock domain of tile
         sbus.coupleFrom(t.tileParams.baseName) { bus =>
