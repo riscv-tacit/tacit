@@ -465,7 +465,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               prev_time := Mux(byte_buffer.io.enq.fire, ingress_1.time, prev_time)
               target_addr_encoder.io.input_value := target_addr_msg
               encode_target_addr_valid := true.B
-              trap_addr_encoder.io.input_value := ingress_1.group(ingress_1_msg_idx).iaddr
+              trap_addr_encoder.io.input_value := ingress_1.group(ingress_1_msg_idx).iaddr >> 1.U
               encode_trap_addr_valid := true.B
               is_compressed := false.B
               packet_valid := !sent
@@ -477,7 +477,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               prev_time := Mux(byte_buffer.io.enq.fire, ingress_1.time, prev_time)
               target_addr_encoder.io.input_value := target_addr_msg
               encode_target_addr_valid := true.B
-              trap_addr_encoder.io.input_value := ingress_1.group(ingress_1_msg_idx).iaddr
+              trap_addr_encoder.io.input_value := ingress_1.group(ingress_1_msg_idx).iaddr >> 1.U
               encode_trap_addr_valid := true.B
               is_compressed := false.B
               packet_valid := !sent
@@ -489,7 +489,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               prev_time := Mux(byte_buffer.io.enq.fire, ingress_1.time, prev_time)
               target_addr_encoder.io.input_value := target_addr_msg
               encode_target_addr_valid := true.B
-              trap_addr_encoder.io.input_value := ingress_1.group(ingress_1_msg_idx).iaddr
+              trap_addr_encoder.io.input_value := ingress_1.group(ingress_1_msg_idx).iaddr >> 1.U
               encode_trap_addr_valid := true.B
               is_compressed := false.B
               packet_valid := !sent
