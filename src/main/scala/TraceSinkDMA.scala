@@ -18,11 +18,11 @@ case class TraceSinkDMAParams(
   beatBytes: Int
 )
 
-class TraceSinkDMA(params: TraceSinkDMAParams)(implicit p: Parameters) extends LazyTraceSink {
+class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Parameters) extends LazyTraceSink {
   val node = TLClientNode(Seq(TLMasterPortParameters.v1(Seq(TLClientParameters(
     name = "trace-sink-dma", sourceId = IdRange(0, 1))))))
 
-  val device = new SimpleDevice("trace-sink-dma", Seq("ucbbar,trace0"))
+  val device = new SimpleDevice(s"trace-sink-dma$hartId", Seq("ucbbar,tracesinkdma"))
   val regnode = TLRegisterNode(
     address = Seq(AddressSet(params.regNodeBaseAddr, 0xFF)),
     device = device,
@@ -146,8 +146,7 @@ class WithTraceSinkDMA(targetId: Int = 1) extends Config((site, here, up) => {
           tp.tileParams.traceParams.get.buildSinks :+ (p => 
             (LazyModule(new TraceSinkDMA(TraceSinkDMAParams(
             regNodeBaseAddr = 0x3010000 + tp.tileParams.tileId * 0x1000,
-            beatBytes = xBytes
-        ))(p)), targetId)))))
+            beatBytes = xBytes), hartId = tp.tileParams.tileId)(p)), targetId)))))
       )
     }
     case tp: ShuttleTileAttachParams => {
@@ -157,8 +156,7 @@ class WithTraceSinkDMA(targetId: Int = 1) extends Config((site, here, up) => {
           tp.tileParams.traceParams.get.buildSinks :+ (p => 
             (LazyModule(new TraceSinkDMA(TraceSinkDMAParams(
             regNodeBaseAddr = 0x3010000 + tp.tileParams.tileId * 0x1000,
-            beatBytes = xBytes
-        ))(p)), targetId)))))
+            beatBytes = xBytes), hartId = tp.tileParams.tileId)(p)), targetId)))))
       )
     }
     case other => other
