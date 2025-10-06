@@ -26,6 +26,8 @@ class DSCBranchPredictor(params: TacitBPParams) extends Module {
     val update_taken = Input(Bool())
   })
   require(isPow2(params.n_entries), "n_entries must be a power of 2")
+  require(params.n_entries >= 64, "n_entries must be at least 64")
+  require(params.n_entries <= 1024, "n_entries must be at most 1024")
   
   def hash(pc: UInt): UInt = { (pc >> 1.U) % params.n_entries.U }
   def judge(counter: UInt): Bool = { counter === CounterState.STRONG_TAKEN || counter === CounterState.WEAK_TAKEN}
