@@ -437,6 +437,8 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
               prv_encoder.io.from_priv := ingress_1.priv
               prv_encoder.io.to_priv := ingress_0.priv
               encode_prv_valid := true.B
+              ctx_encoder.io.input_value := ingress_1.ctx
+              encode_ctx_valid := ingress_0.priv === 0.U // encode ctx if returning to user mode
               is_compressed := false.B
               packet_valid := !sent
             }
