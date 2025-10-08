@@ -20,7 +20,7 @@ case class TraceSinkDMAParams(
 
 class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Parameters) extends LazyTraceSink {
   val node = TLClientNode(Seq(TLMasterPortParameters.v1(Seq(TLClientParameters(
-    name = "trace-sink-dma", sourceId = IdRange(0, 1))))))
+    name = "trace-sink-dma", sourceId = IdRange(0, 16))))))
 
   val device = new SimpleDevice(s"trace-sink-dma$hartId", Seq("ucbbar,tracesinkdma"))
   val regnode = TLRegisterNode(
@@ -38,7 +38,7 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
     val busWidth = edge.bundle.dataBits
     val blockBytes = p(CacheBlockBytes)
     
-    val mIdle :: mCollect :: mWrite :: mResp :: Nil = Enum(4)
+    val mIdle :: mCollect :: mWrite :: Nil = Enum(3)
     val mstate = RegInit(mIdle)
     
     // tracks how much trace data have we written in total
@@ -57,14 +57,19 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
     val flush_done = (flush_reg) && (fifo.io.deq.valid === false.B) && mstate === mIdle
     done_reg := done_reg || flush_done
     
-    mem.a.valid := mstate === mWrite
-    mem.d.ready := mstate === mResp
+    val inflight_counter = RegInit(0.U(4.W))
+
+    mem.a.valid := mstate === mWrite && inflight_counter < 16.U
+    mem.d.ready := true.B
     fifo.io.deq.ready := false.B // default case 
     dontTouch(mem.d.valid)
 
     // mask according to collect_counter
     val mask = (1.U << collect_counter) - 1.U
     // putting the buffer data on the TL mem lane
+
+    inflight_counter := Mux(mem.a.fire && !mem.d.fire, inflight_counter + 1.U, 
+        Mux(mem.d.fire && !mem.a.fire, inflight_counter - 1.U, inflight_counter))
 
     val put_req = edge.Put(
       fromSource = 0.U,
@@ -92,12 +97,8 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
       is (mWrite) {
         // we need to write the collected data to the memory
         fifo.io.deq.ready := false.B
-        mstate := Mux(mem.a.fire, mResp, mWrite)
-      }
-      is (mResp) {
-        fifo.io.deq.ready := false.B
-        mstate := Mux(mem.d.fire, mIdle, mResp)
-        addr_counter := Mux(mem.d.fire, addr_counter + collect_counter, addr_counter)
+        mstate := Mux(mem.a.fire, mIdle, mWrite)
+        addr_counter := Mux(mem.a.fire, addr_counter + collect_counter, addr_counter)
       }
     }
 
