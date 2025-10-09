@@ -17,7 +17,20 @@ class VarLenEncoder(val maxWidth: Int) extends Module {
 
   // 0-indexed MSB index 
   val msb_index = (maxWidth - 1).U - PriorityEncoder(Reverse(io.input_value))
-  io.output_num_bytes := Mux(io.input_valid, (msb_index / 7.U) + 1.U, 0.U)
+  
+  val byte_count = Wire(UInt(log2Ceil(maxNumBytes).W))
+  byte_count := 0.U
+  
+  // Check each possible byte count range
+  for (i <- 0 until maxNumBytes) {
+    val range_start = i * 7
+    val range_end = (i + 1) * 7 - 1
+    when (msb_index >= range_start.U && msb_index <= range_end.U) {
+      byte_count := (i + 1).U
+    }
+  }
+  
+  io.output_num_bytes := Mux(io.input_valid, byte_count, 0.U)
 
   for (i <- 0 until maxNumBytes) {
     val is_last_byte = (i.U === (io.output_num_bytes - 1.U))
