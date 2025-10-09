@@ -73,7 +73,4 @@ trait CanHaveTraceSinkRawByte { this: BaseSubsystem =>
   } else {
     Nil
   }
-  if (tacit_bytes.nonEmpty) {
-    println(s"TraceSinkRawBytes: ${tacit_bytes.length}")
-  }
 }
