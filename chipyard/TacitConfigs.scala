@@ -73,5 +73,17 @@ class TacitRocketRawByteConfig extends Config(
   new chipyard.config.WithTraceArbiterMonitor ++
   new chipyard.WithTacitEncoder ++
   new freechips.rocketchip.subsystem.WithoutTLMonitors ++
+  new chipyard.config.WithAsidLen(16) ++
   new freechips.rocketchip.rocket.WithNHugeCores(1) ++
+  new chipyard.config.AbstractConfig)
+  
+class TacitDualRocketRawByteConfig extends Config(
+  new tacit.WithTraceSinkRawByte(2) ++
+  new tacit.WithTraceSinkDMA(1) ++
+  new tacit.WithTraceSinkAlways(0) ++
+  new chipyard.config.WithTraceArbiterMonitor ++
+  new chipyard.WithTacitEncoder ++
+  new freechips.rocketchip.subsystem.WithoutTLMonitors ++
+  new chipyard.config.WithAsidLen(16) ++
+  new freechips.rocketchip.rocket.WithNHugeCores(2) ++
   new chipyard.config.AbstractConfig)
