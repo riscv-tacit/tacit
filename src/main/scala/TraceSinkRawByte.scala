@@ -65,7 +65,7 @@ trait CanHaveTraceSinkRawByte { this: BaseSubsystem =>
       val slavenode = new TraceSinkRawByteSlaveNode()(ValName("trace_sink_raw_byte"))
       slavenode := s.node
       InModuleBody {
-        val tacit_byte = IO(new TraceSinkRawByteBundle)
+        val tacit_byte = IO(new TraceSinkRawByteBundle).suggestName(s"trace_sink_raw_byte_${t.name}${t.tileId}")
         tacit_byte.out <> slavenode.in.head._1.out
         tacit_byte
       }
