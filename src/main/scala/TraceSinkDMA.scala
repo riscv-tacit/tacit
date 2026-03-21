@@ -64,11 +64,14 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
     val busWidth = edge.bundle.dataBits
     val blockBytes = p(CacheBlockBytes)
     
-    val mIdle :: mCollect :: mWrite :: Nil = Enum(3)
+    val mIdle :: mCollect :: mWrite :: mOverflow :: Nil = Enum(4)
     val mstate = RegInit(mIdle)
     
     // tracks how much trace data have we written in total
     val addr_counter = RegInit(0.U(64.W))
+    // max size of the trace data to be collected before we overflow. 
+    // software shall make a guarantee on this value to be a multiple of the bus width.
+    val max_size_reg = RegInit(((BigInt(1) << 64) - 1).U(64.W)) //TODO: make this a sane number
     // tracks how much trace data have we collected in current transaction
     val collect_counter = RegInit(0.U(4.W))
     val msg_buffer = RegInit(VecInit(Seq.fill(busWidth / 8)(0.U(8.W))))
@@ -87,7 +90,7 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
     val done_reg = RegInit(false.B)
     val collect_full = collect_counter === (busWidth / 8).U
     val collect_advance = Mux(flush_reg, collect_full || fifo.io.deq.valid === false.B, collect_full)
-    val flush_done = (flush_reg) && (fifo.io.deq.valid === false.B) && mstate === mIdle
+    val flush_done = (flush_reg) && (fifo.io.deq.valid === false.B) && (mstate === mIdle || mstate === mOverflow)
     done_reg := done_reg || flush_done
     
     // mask according to collect_counter
@@ -101,16 +104,29 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
       data = Cat(msg_buffer.reverse),
       mask = mask)._2
 
+    val sourceGen = Module(new SourceGenerator(edge.bundle.sourceBits))
+    val sourceReady = sourceGen.io.id.valid
+    sourceGen.io.gen := mstate === mCollect && collect_advance
+    sourceGen.io.reclaim.valid := mem.d.fire
+    sourceGen.io.reclaim.bits := mem.d.bits.source
+    val latched_source = Reg(UInt(edge.bundle.sourceBits.W))
+    when (sourceGen.io.gen) {
+      latched_source := sourceGen.io.id.bits
+    }
     mem.a.bits := put_req
-    val (sourceReady, _) = SourceGenerator(mem)
+    mem.a.bits.source := latched_source
     mem.a.valid := mstate === mWrite && sourceReady
     mem.d.ready := true.B
     fifo.io.deq.ready := false.B
 
     switch(mstate) {
       is (mIdle) {
-        mstate := Mux(fifo.io.deq.valid, mCollect, mIdle)
-        collect_counter := 0.U
+        when (addr_counter >= max_size_reg) {
+          mstate := mOverflow
+        } .otherwise {
+          mstate := Mux(fifo.io.deq.valid, mCollect, mIdle)
+          collect_counter := 0.U
+        }
       }
       is (mCollect) {
         // either we have collected enough data or that's all the messages for now
@@ -125,16 +141,15 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
         mstate := Mux(mem.a.fire, mIdle, mWrite)
         addr_counter := Mux(mem.a.fire, addr_counter + collect_counter, addr_counter)
       }
+      is (mOverflow) {
+        fifo.io.deq.ready := true.B // dequeue all the remaining packets but do nothing with them
+      }
     }
 
     when (reset_reg) {
       mstate := mIdle
       addr_counter := 0.U
       collect_counter := 0.U
-      // FIXME: maybe should not clear the message buffer for timing concerns
-      msg_buffer := VecInit(Seq.fill(busWidth / 8)(0.U(8.W)))
-      dma_start_addr := 0.U
-      dma_addr_write_valid := false.B
     }
     Pulsify(reset_reg, 1)
 
@@ -168,7 +183,10 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
         0x10 -> Seq(RegField(64, addr_counter,
             RegFieldDesc("addr_counter", "Address counter, this is the number of bytes written to the memory to date"))
         ),
-        0x18 -> Seq(RegField(1, reset_reg, 
+        0x18 -> Seq(RegField(64, max_size_reg,
+          RegFieldDesc("max_size_reg", "Max size register"))
+        ),
+        0x20 -> Seq(RegField(1, reset_reg, 
           RegFieldDesc("reset_reg", "Soft reset register")))
       ):_*
     )
