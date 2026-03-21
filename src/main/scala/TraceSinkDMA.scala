@@ -68,10 +68,10 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
     val mstate = RegInit(mIdle)
     
     // tracks how much trace data have we written in total
-    val addr_counter = RegInit(0.U(64.W))
+    val addr_counter = RegInit(x"180000000".U(64.W)) // yrh: where mbus manager scratchpad starts
     // max size of the trace data to be collected before we overflow. 
     // software shall make a guarantee on this value to be a multiple of the bus width.
-    val max_size_reg = RegInit(((BigInt(1) << 64) - 1).U(64.W)) //TODO: make this a sane number
+    val max_size_reg = RegInit(((BigInt(1) << 10) - 1).U(64.W)) // 1KiB
     // tracks how much trace data have we collected in current transaction
     val collect_counter = RegInit(0.U(4.W))
     val msg_buffer = RegInit(VecInit(Seq.fill(busWidth / 8)(0.U(8.W))))
