@@ -12,6 +12,7 @@ import freechips.rocketchip.tile._
 import shuttle.common.{ShuttleTile, ShuttleTileAttachParams}
 import freechips.rocketchip.trace._
 import testchipip.soc.{SubsystemInjector, SubsystemInjectorKey}
+import freechips.rocketchip.resources.BigIntHexContext
 
 /** Takes a Bool and forces it to deassert after pulseLength cycles by using Chisel last-connect semantics, effectively
   * "stretching" the pulse.
