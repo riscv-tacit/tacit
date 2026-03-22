@@ -152,6 +152,7 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
       addr_counter := 0.U
       collect_counter := 0.U
       done_reg := false.B
+      flush_reg := false.B
     }
     Pulsify(reset_reg, 1)
 
