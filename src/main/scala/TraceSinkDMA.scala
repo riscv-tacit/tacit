@@ -69,15 +69,15 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
     val mstate = RegInit(mIdle)
     
     // tracks how much trace data have we written in total
-    val addr_counter = RegInit(x"180000000".U(64.W)) // yrh: where mbus manager scratchpad starts
+    val addr_counter = RegInit(0.U(64.W)) 
     // max size of the trace data to be collected before we overflow. 
     // software shall make a guarantee on this value to be a multiple of the bus width.
-    val max_size_reg = RegInit(((BigInt(1) << 10) - 1).U(64.W)) // 1KiB
+    val max_size_reg = RegInit((1024.U(64.W))) // 1KiB
     // tracks how much trace data have we collected in current transaction
-    val collect_counter = RegInit(0.U(4.W))
+    val collect_counter = RegInit(0.U(log2Ceil(busWidth/8 + 1).W))
     val msg_buffer = RegInit(VecInit(Seq.fill(busWidth / 8)(0.U(8.W))))
 
-    val dma_start_addr = RegInit(0.U(64.W))
+    val dma_start_addr = RegInit(x"180000000".U(64.W)) // yrh: where mbus manager scratchpad starts
     val dma_addr_write_valid = Wire(Bool())
 
     // control registers
@@ -111,7 +111,7 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
     sourceGen.io.reclaim.valid := mem.d.fire
     sourceGen.io.reclaim.bits := mem.d.bits.source
     val latched_source = Reg(UInt(edge.bundle.sourceBits.W))
-    when (sourceGen.io.gen) {
+    when (sourceGen.io.gen && sourceReady) {
       latched_source := sourceGen.io.id.bits
     }
     mem.a.bits := put_req
@@ -151,6 +151,7 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
       mstate := mIdle
       addr_counter := 0.U
       collect_counter := 0.U
+      done_reg := false.B
     }
     Pulsify(reset_reg, 1)
 
