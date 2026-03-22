@@ -90,7 +90,6 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
     // done flag that indicates that the DMA engine has finished processing all the packets
     val done_reg = RegInit(false.B)
     val collect_full = collect_counter === (busWidth / 8).U
-    val collect_advance = Mux(flush_reg, collect_full || fifo.io.deq.valid === false.B, collect_full)
     val flush_done = (flush_reg) && (fifo.io.deq.valid === false.B) && (mstate === mIdle || mstate === mOverflow)
     done_reg := done_reg || flush_done
     
@@ -107,7 +106,6 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
 
     val sourceGen = Module(new SourceGenerator(edge.bundle.sourceBits))
     val sourceReady = sourceGen.io.id.valid
-    sourceGen.io.gen := mstate === mCollect && collect_advance
     sourceGen.io.reclaim.valid := mem.d.fire
     sourceGen.io.reclaim.bits := mem.d.bits.source
     val latched_source = Reg(UInt(edge.bundle.sourceBits.W))
@@ -119,6 +117,9 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
     mem.a.valid := mstate === mWrite && sourceReady
     mem.d.ready := true.B
     fifo.io.deq.ready := false.B
+
+    val collect_advance = Mux(flush_reg, (collect_full || fifo.io.deq.valid === false.B) && sourceReady, collect_full && sourceReady)
+    sourceGen.io.gen := mstate === mCollect && collect_advance
 
     switch(mstate) {
       is (mIdle) {
