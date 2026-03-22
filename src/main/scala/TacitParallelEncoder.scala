@@ -92,6 +92,10 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
     packet_valids(i) && (first_valid_index === i.U)
   })
 
+  val all_buffers_ready = metadata_buffer.io.enqs(0).ready &&                                                                                                                                                                                                                                                                                                           
+                          header_buffer.io.enqs(0).ready &&                                                                                                                                                                                                                                                                                                             
+                          message_packet_buffer.io.enqs(0).ready 
+
   for (i <- 0 until coreParams.nGroups) {
     val message_encoder = Module(new MessageEncoder(coreParams, canEncodeSyncMessage = i == 0, my_index = i))
     if (i == 0) { 
@@ -110,23 +114,25 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
     val is_compressed = message_encoder.io.possible_to_compress && time_can_be_compressed
     metadata_enq_bits(i).is_full := ~is_compressed
     metadata_buffer.io.enqs(i).bits := metadata_enq_bits(i)
-    metadata_buffer.io.enqs(i).valid := message_encoder.io.packet_valid && !sent
+    metadata_buffer.io.enqs(i).valid := message_encoder.io.packet_valid && !sent && all_buffers_ready
 
     message_packet_enq_bits(i) := message_encoder.io.message
     val zero_varlen_bytes = VecInit.fill(time_encoder.maxNumBytes)(0.U(8.W))
     zero_varlen_bytes(0) := 0x80.U(8.W) // signify a varlen encoded zero
     message_packet_enq_bits(i).time := Mux(is_first_valid(i), time_encoder.io.output_bytes, zero_varlen_bytes)
     message_packet_buffer.io.enqs(i).bits := message_packet_enq_bits(i)
-    message_packet_buffer.io.enqs(i).valid := message_encoder.io.packet_valid && !is_compressed && !sent
+    message_packet_buffer.io.enqs(i).valid := message_encoder.io.packet_valid && !is_compressed && !sent && all_buffers_ready
 
     val compressed_packet = Cat(Mux(is_first_valid(i), delta_time(5,0), 0.U(6.W)), message_encoder.io.comp_header)
     header_buffer.io.enqs(i).bits := Mux(is_compressed, compressed_packet, message_encoder.io.full_header)
-    header_buffer.io.enqs(i).valid := message_encoder.io.packet_valid && !sent
+    header_buffer.io.enqs(i).valid := message_encoder.io.packet_valid && !sent && all_buffers_ready
   }
 
   for (i <- 0 until coreParams.nGroups) {
     metadata_buffer.io.enqs(i).bits := metadata_enq_bits(i)
     message_packet_buffer.io.enqs(i).bits := message_packet_enq_bits(i)
+    assert(metadata_buffer.io.enqs(i).fire === header_buffer.io.enqs(i).fire,
+      s"metadata and header buffer must fire atomically on port $i")
   }
 
   // at least one metadata packet has enqueued
