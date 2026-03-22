@@ -42,7 +42,8 @@ object Pulsify {
 
 case class TraceSinkDMAParams(
   regNodeBaseAddr: BigInt,
-  beatBytes: Int
+  beatBytes: Int,
+  nSource: Int = 16
 )
 
 object DMAMode {
@@ -51,8 +52,9 @@ object DMAMode {
 }
 
 class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Parameters) extends LazyTraceSink {
+  val numSources = params.nSource
   val node = TLClientNode(Seq(TLMasterPortParameters.v1(Seq(TLClientParameters(
-    name = "trace-sink-dma", sourceId = IdRange(0, 16))))))
+    name = "trace-sink-dma", sourceId = IdRange(0, numSources))))))
 
   val device = new SimpleDevice(s"trace-sink-dma$hartId", Seq("ucbbar,tracesinkdma"))
   val regnode = TLRegisterNode(
@@ -102,6 +104,10 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
 
     val sourceGen = Module(new SourceGenerator(edge.bundle.sourceBits))
     val sourceReady = sourceGen.io.id.valid
+    val src_ready_stall_count = RegInit(0.U(32.W))
+    when (!sourceReady) {
+      src_ready_stall_count := src_ready_stall_count + 1.U
+    }
     val entering_mWrite = mstate === mIdle && serialWidthAggregator.io.wide.valid &&
                       !(mode_reg === DMAMode.overflow.U && addr_full) &&
                       sourceReady
@@ -159,6 +165,7 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
     when (reset_reg) {
       mstate := mIdle
       addr_counter := 0.U
+      src_ready_stall_count := 0.U
     }
     Pulsify(reset_reg, 1)
 
@@ -182,13 +189,16 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
         ),
         0x20 -> Seq(RegField(32, wrap_count,
           RegFieldDesc("wrap_count", "Wrap count, this is the number of times the address counter wrapped around"))
+        ),
+        0x24 -> Seq(RegField(32, src_ready_stall_count,
+          RegFieldDesc("sourceReadyStalledCount", "Source ready stalled count, this is the number of times the source was not ready"))
         )
       ):_*
     )
   }
 }
 
-class WithTraceSinkDMA(targetId: Int = 1) extends Config((site, here, up) => {
+class WithTraceSinkDMA(targetId: Int = 1, nSource: Int = 16) extends Config((site, here, up) => {
   case TilesLocated(InSubsystem) => up(TilesLocated(InSubsystem), site) map {
     case tp: RocketTileAttachParams => {
       // redefine tile level constants
@@ -218,7 +228,7 @@ class WithTraceSinkDMA(targetId: Int = 1) extends Config((site, here, up) => {
           tp.tileParams.traceParams.get.buildSinks :+ (p => 
             (LazyModule(new TraceSinkDMA(TraceSinkDMAParams(
             regNodeBaseAddr = 0x3010000 + tp.tileParams.tileId * 0x1000,
-            beatBytes = xBytes), hartId = tp.tileParams.tileId)(p)), targetId)))))
+            beatBytes = xBytes, nSource = nSource), hartId = tp.tileParams.tileId)(p)), targetId)))))
       )
     }
     case tp: boom.v4.common.BoomTileAttachParams => {
