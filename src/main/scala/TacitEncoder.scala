@@ -100,6 +100,8 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   trace_packetizer.io.ctx <> ctx_buffer.io.deq
 
   // low performance compliance, only use one lane
+  io.out.bits := VecInit.fill(TraceEgressConstants.numLanes)(0.U(8.W))
+  io.out.mask := VecInit.fill(TraceEgressConstants.numLanes)(false.B)
   io.out.bits(0) := trace_packetizer.io.out.bits
   io.out.mask(0) := trace_packetizer.io.out.valid
   io.out.valid := trace_packetizer.io.out.valid
