@@ -58,7 +58,7 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
 
   val device = new SimpleDevice(s"trace-sink-dma$hartId", Seq("ucbbar,tracesinkdma"))
   val regnode = TLRegisterNode(
-    address = Seq(AddressSet(params.regNodeBaseAddr, 0xFF)),
+    address = Seq(AddressSet(params.regNodeBaseAddr, 0xFFF)),
     device = device,
     beatBytes = params.beatBytes
   )
