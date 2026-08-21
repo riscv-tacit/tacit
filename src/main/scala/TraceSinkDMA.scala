@@ -300,10 +300,7 @@ case object TraceSinkDMAInjector extends SubsystemInjector((p, baseSubsystem) =>
           bus := mbus.crossOut(s.node)(ValName("trace_sink_dma"))(AsynchronousCrossing())
         }
         t match {
-          // Same pattern as the trace_encoder_controller connection in shuttle Tile.scala.
-          // TODO: switch to shuttleTile.connectTLSlaveAtTileBeatBytes(s.regnode) once local
-          // shuttle merges ucb-bar/shuttle@7f6bfe7 (iris lineage; diverged from local TLB-ASID work).
-          case shuttleTile: ShuttleTile => shuttleTile.connectTLSlave(s.regnode, shuttleTile.shuttleParams.tileBeatBytes)
+          case shuttleTile: ShuttleTile => shuttleTile.connectTLSlaveAtTileBeatBytes(s.regnode)
           case _ => t.connectTLSlave(s.regnode, t.xBytes)
         }
       }
