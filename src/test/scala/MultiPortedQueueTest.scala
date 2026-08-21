@@ -428,7 +428,7 @@ class MultiPortedQueueTest extends AnyFlatSpec with ChiselScalatestTester {
   behavior of "MultiPortedQueue (SRAM-backed)"
 
   it should "dequeue in FIFO order with all ports valid" in {
-    test(new MultiPortedQueue(UInt(8.W), numEntries = 8, numInputs = 2, useSramQueue = true)).withAnnotations(waveformAnnos) { c =>
+    test(new MultiPortedQueue(UInt(8.W), numEntries = 8, numInputs = 2, impl = MPQueueImpl.SRAM)).withAnnotations(waveformAnnos) { c =>
       resetDUT(c.clock, c.reset)
       val values = (1 to 8).toSeq
       val batches = fullBatches(values, 2)
@@ -438,7 +438,7 @@ class MultiPortedQueueTest extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   it should "assert backpressure when full and resume after dequeue" in {
-    test(new MultiPortedQueue(UInt(8.W), numEntries = 4, numInputs = 2, useSramQueue = true)).withAnnotations(waveformAnnos) { c =>
+    test(new MultiPortedQueue(UInt(8.W), numEntries = 4, numInputs = 2, impl = MPQueueImpl.SRAM)).withAnnotations(waveformAnnos) { c =>
       resetDUT(c.clock, c.reset)
 
       // Fill the queue
@@ -470,7 +470,7 @@ class MultiPortedQueueTest extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   it should "handle partial valid patterns preserving port ordering" in {
-    test(new MultiPortedQueue(UInt(8.W), numEntries = 8, numInputs = 2, useSramQueue = true)).withAnnotations(waveformAnnos) { c =>
+    test(new MultiPortedQueue(UInt(8.W), numEntries = 8, numInputs = 2, impl = MPQueueImpl.SRAM)).withAnnotations(waveformAnnos) { c =>
       resetDUT(c.clock, c.reset)
 
       val b1: Seq[Option[Int]] = Seq(Some(10), None)
@@ -485,7 +485,7 @@ class MultiPortedQueueTest extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   it should "handle simultaneous enqueue and dequeue" in {
-    test(new MultiPortedQueue(UInt(8.W), numEntries = 4, numInputs = 2, useSramQueue = true)).withAnnotations(waveformAnnos) { c =>
+    test(new MultiPortedQueue(UInt(8.W), numEntries = 4, numInputs = 2, impl = MPQueueImpl.SRAM)).withAnnotations(waveformAnnos) { c =>
       resetDUT(c.clock, c.reset)
 
       // Prime the queue
@@ -516,7 +516,7 @@ class MultiPortedQueueTest extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   it should "survive fill-drain cycles back to back" in {
-    test(new MultiPortedQueue(UInt(8.W), numEntries = 4, numInputs = 2, useSramQueue = true)).withAnnotations(waveformAnnos) { c =>
+    test(new MultiPortedQueue(UInt(8.W), numEntries = 4, numInputs = 2, impl = MPQueueImpl.SRAM)).withAnnotations(waveformAnnos) { c =>
       resetDUT(c.clock, c.reset)
 
       for (round <- 0 until 5) {
@@ -530,7 +530,7 @@ class MultiPortedQueueTest extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   it should "handle dequeue backpressure with periodic ready" in {
-    test(new MultiPortedQueue(UInt(8.W), numEntries = 8, numInputs = 2, useSramQueue = true)).withAnnotations(waveformAnnos) { c =>
+    test(new MultiPortedQueue(UInt(8.W), numEntries = 8, numInputs = 2, impl = MPQueueImpl.SRAM)).withAnnotations(waveformAnnos) { c =>
       resetDUT(c.clock, c.reset)
       val values = (0 until 8).toSeq
       val batches = fullBatches(values, 2)
@@ -540,7 +540,7 @@ class MultiPortedQueueTest extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   it should "pass randomized stress test" in {
-    test(new MultiPortedQueue(UInt(8.W), numEntries = 16, numInputs = 2, useSramQueue = true)).withAnnotations(waveformAnnos) { c =>
+    test(new MultiPortedQueue(UInt(8.W), numEntries = 16, numInputs = 2, impl = MPQueueImpl.SRAM)).withAnnotations(waveformAnnos) { c =>
       resetDUT(c.clock, c.reset)
       val batchRng = new Random(42)
       val deqRng = new Random(43)
@@ -551,7 +551,7 @@ class MultiPortedQueueTest extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   it should "pass randomized stress test with 4 input ports" in {
-    test(new MultiPortedQueue(UInt(8.W), numEntries = 16, numInputs = 4, useSramQueue = true)).withAnnotations(waveformAnnos) { c =>
+    test(new MultiPortedQueue(UInt(8.W), numEntries = 16, numInputs = 4, impl = MPQueueImpl.SRAM)).withAnnotations(waveformAnnos) { c =>
       resetDUT(c.clock, c.reset)
       val batchRng = new Random(999)
       val deqRng = new Random(1000)
@@ -562,7 +562,7 @@ class MultiPortedQueueTest extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   it should "report correct count at full capacity and drain correctly" in {
-    test(new MultiPortedQueue(UInt(8.W), numEntries = 4, numInputs = 2, useSramQueue = true)).withAnnotations(waveformAnnos) { c =>
+    test(new MultiPortedQueue(UInt(8.W), numEntries = 4, numInputs = 2, impl = MPQueueImpl.SRAM)).withAnnotations(waveformAnnos) { c =>
       resetDUT(c.clock, c.reset)
       c.io.deq.ready.poke(false.B)
 
@@ -607,7 +607,7 @@ class MultiPortedQueueTest extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   it should "report empty when nothing enqueued" in {
-    test(new MultiPortedQueue(UInt(8.W), numEntries = 4, numInputs = 2, useSramQueue = true)).withAnnotations(waveformAnnos) { c =>
+    test(new MultiPortedQueue(UInt(8.W), numEntries = 4, numInputs = 2, impl = MPQueueImpl.SRAM)).withAnnotations(waveformAnnos) { c =>
       resetDUT(c.clock, c.reset)
       clearEnqs(c.io.enqs,2)
       c.io.deq.ready.poke(true.B)
@@ -622,7 +622,7 @@ class MultiPortedQueueTest extends AnyFlatSpec with ChiselScalatestTester {
   behavior of "MultiPortedQueue (Reg-backed via wrapper)"
 
   it should "match reg queue behavior through the wrapper" in {
-    test(new MultiPortedQueue(UInt(8.W), numEntries = 8, numInputs = 2, useSramQueue = false)).withAnnotations(waveformAnnos) { c =>
+    test(new MultiPortedQueue(UInt(8.W), numEntries = 8, numInputs = 2, impl = MPQueueImpl.Reg)).withAnnotations(waveformAnnos) { c =>
       resetDUT(c.clock, c.reset)
       val values = (10 to 17).toSeq
       val batches = fullBatches(values, 2)
@@ -632,7 +632,7 @@ class MultiPortedQueueTest extends AnyFlatSpec with ChiselScalatestTester {
   }
 
   it should "pass randomized stress test through the wrapper" in {
-    test(new MultiPortedQueue(UInt(8.W), numEntries = 16, numInputs = 2, useSramQueue = false)).withAnnotations(waveformAnnos) { c =>
+    test(new MultiPortedQueue(UInt(8.W), numEntries = 16, numInputs = 2, impl = MPQueueImpl.Reg)).withAnnotations(waveformAnnos) { c =>
       resetDUT(c.clock, c.reset)
       val batchRng = new Random(77)
       val deqRng = new Random(78)
