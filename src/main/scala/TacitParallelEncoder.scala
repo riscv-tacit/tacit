@@ -15,10 +15,23 @@ import freechips.rocketchip.trace._
 import org.chipsalliance.cde.config.Parameters
 
 class TacitParallelEncoder(
-  override val coreParams: TraceCoreParams, 
-  val bufferDepth: Int, 
-  val coreStages: Int, 
-)(implicit p: Parameters) 
+  override val coreParams: TraceCoreParams,
+  val bufferDepth: Int,
+  val coreStages: Int,
+  val queueImpl: MPQueueImpl = MPQueueImpl.SRAM,
+  // Cycles of ingress that can still arrive after io.stall asserts. BOOM gates
+  // ROB commit on stall, so this is NOT the core pipeline depth: it is stall
+  // propagation (~1 cycle) plus the encoder's own ingress_0/ingress_1 stages.
+  // A fetch-stalled in-order core (e.g. Shuttle) must instead cover its full
+  // drain window here. Keep it in true cycle units.
+  val stallQuiescenceCycles: Int = 3,
+  // Worst-case packet-producing retires per cycle (None = nGroups). A core that
+  // is nGroups wide but architecturally limited (e.g. Shuttle retiring at most
+  // one control-flow packet per cycle) declares the tighter bound here; the
+  // queues size their stall reserve as stallQuiescenceCycles x this bound and
+  // assert the bound every cycle.
+  val maxPacketsPerCycle: Option[Int] = None,
+)(implicit p: Parameters)
     extends LazyTraceEncoder(coreParams)(p) {
   override lazy val module = new TacitParallelEncoderModule(this)
 }
@@ -63,9 +76,20 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
   val time_encoder = Module(new VarLenMaskEncoder(coreParams.xlen))
   
   // buffers
-  val metadata_buffer = MultiPortedQueue(new MetaDataBundle(coreParams), outer.bufferDepth, coreParams.nGroups, useSramQueue = true)
-  val message_packet_buffer = MultiPortedQueue(new MessagePacketBundle(coreParams), outer.bufferDepth, coreParams.nGroups, useSramQueue = true)
-  val header_buffer = MultiPortedQueue(UInt(8.W), outer.bufferDepth, coreParams.nGroups, useSramQueue = true)
+  // Each buffer must absorb the packets still in flight after io.stall asserts:
+  // stallQuiescenceCycles (stall->commit-gate propagation + ingress_0/ingress_1),
+  // each cycle worth up to nGroups enqueues. The queue owns this unit conversion.
+  // (coreStages is NOT used here: for BOOM it was calibrated as an element budget
+  // for the legacy count threshold, not a cycle count.)
+  // Legacy impls derive io.stall from count instead and never honor the reserve,
+  // so don't let it constrain their elaboration (e.g. stress configs with tiny buffers).
+  val bufferReserveCycles = outer.queueImpl match {
+    case MPQueueImpl.SRAM => outer.stallQuiescenceCycles
+    case _ => 0
+  }
+  val metadata_buffer = MultiPortedQueue(new MetaDataBundle(coreParams), outer.bufferDepth, coreParams.nGroups, outer.queueImpl, bufferReserveCycles, outer.maxPacketsPerCycle)
+  val message_packet_buffer = MultiPortedQueue(new MessagePacketBundle(coreParams), outer.bufferDepth, coreParams.nGroups, outer.queueImpl, bufferReserveCycles, outer.maxPacketsPerCycle)
+  val header_buffer = MultiPortedQueue(UInt(8.W), outer.bufferDepth, coreParams.nGroups, outer.queueImpl, bufferReserveCycles, outer.maxPacketsPerCycle)
 
   val trace_packetizer = Module(new TraceMaskedPacketizer(coreParams))
   trace_packetizer.io.message <> message_packet_buffer.io.deq
@@ -167,11 +191,19 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
       }
     }
   }
-  def stallThreshold(count: UInt) = count >= (outer.bufferDepth - outer.coreStages).U
-
-  io.stall := stallThreshold(metadata_buffer.io.count) || 
-              stallThreshold(message_packet_buffer.io.count) ||
-              stallThreshold(header_buffer.io.count)
+  outer.queueImpl match {
+    case MPQueueImpl.SRAM =>
+      io.stall := metadata_buffer.io.stall ||
+                  message_packet_buffer.io.stall ||
+                  header_buffer.io.stall
+    case _ =>
+      // legacy stall policy, preserved verbatim so existing configs/bitstreams
+      // (e.g. ongoing TraceDoctor experiments) elaborate unchanged
+      def stallThreshold(count: UInt) = count >= (outer.bufferDepth - outer.coreStages).U
+      io.stall := stallThreshold(metadata_buffer.io.count) ||
+                  stallThreshold(message_packet_buffer.io.count) ||
+                  stallThreshold(header_buffer.io.count)
+  }
 }
 
 class MessageEncoder(
