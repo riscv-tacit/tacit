@@ -221,26 +221,6 @@ class WithTraceSinkDMA(targetId: Int = 1, nSource: Int = 16) extends Config((sit
             beatBytes = tp.tileParams.tileBeatBytes), hartId = tp.tileParams.tileId)(p)), targetId)))))
       )
     }
-    case tp: boom.v3.common.BoomTileAttachParams => {
-      val xBytes = tp.tileParams.core.xLen / 8
-      tp.copy(tileParams = tp.tileParams.copy(
-        traceParams = Some(tp.tileParams.traceParams.get.copy(buildSinks = 
-          tp.tileParams.traceParams.get.buildSinks :+ (p => 
-            (LazyModule(new TraceSinkDMA(TraceSinkDMAParams(
-            regNodeBaseAddr = 0x3010000 + tp.tileParams.tileId * 0x1000,
-            beatBytes = xBytes, nSource = nSource), hartId = tp.tileParams.tileId)(p)), targetId)))))
-      )
-    }
-    case tp: boom.v4.common.BoomTileAttachParams => {
-      val xBytes = tp.tileParams.core.xLen / 8
-      tp.copy(tileParams = tp.tileParams.copy(
-        traceParams = Some(tp.tileParams.traceParams.get.copy(buildSinks = 
-          tp.tileParams.traceParams.get.buildSinks :+ (p => 
-            (LazyModule(new TraceSinkDMA(TraceSinkDMAParams(
-            regNodeBaseAddr = 0x3010000 + tp.tileParams.tileId * 0x1000,
-            beatBytes = xBytes), hartId = tp.tileParams.tileId)(p)), targetId)))))
-      )
-    }
     case other => other
   }
   case SubsystemInjectorKey => up(SubsystemInjectorKey) + TraceSinkDMAInjector
@@ -269,24 +249,6 @@ case object TraceSinkDMAInjector extends SubsystemInjector((p, baseSubsystem) =>
       } else {
         None
       }
-    case b3: boom.v3.common.BoomTile =>
-      val traceSinkDmas = b3.trace_sinks.collect { case dma: TraceSinkDMA => dma }
-      if (b3.trace_encoder_controller.isDefined || traceSinkDmas.nonEmpty) {
-        require(b3.trace_encoder_controller.isDefined, s"tile ${b3.tileId} has trace DMA sink but no trace encoder controller")
-        require(traceSinkDmas.size == 1, s"tile ${b3.tileId} must have exactly one trace DMA sink, found ${traceSinkDmas.size}")
-        Some((b3, b3.trace_encoder_controller.get, traceSinkDmas.head))
-      } else {
-        None
-      }
-    case b4: boom.v4.common.BoomTile =>
-      val traceSinkDmas = b4.trace_sinks.collect { case dma: TraceSinkDMA => dma }
-      if (b4.trace_encoder_controller.isDefined || traceSinkDmas.nonEmpty) {
-        require(b4.trace_encoder_controller.isDefined, s"tile ${b4.tileId} has trace DMA sink but no trace encoder controller")
-        require(traceSinkDmas.size == 1, s"tile ${b4.tileId} must have exactly one trace DMA sink, found ${traceSinkDmas.size}")
-        Some((b4, b4.trace_encoder_controller.get, traceSinkDmas.head))
-      } else {
-        None
-      }
     case _ => None
   }
   if (traceEncoderDmaBindings.nonEmpty) {
@@ -300,10 +262,7 @@ case object TraceSinkDMAInjector extends SubsystemInjector((p, baseSubsystem) =>
           bus := mbus.crossOut(s.node)(ValName("trace_sink_dma"))(AsynchronousCrossing())
         }
         t match {
-          // Same pattern as the trace_encoder_controller connection in shuttle Tile.scala.
-          // TODO: switch to shuttleTile.connectTLSlaveAtTileBeatBytes(s.regnode) once local
-          // shuttle merges ucb-bar/shuttle@7f6bfe7 (iris lineage; diverged from local TLB-ASID work).
-          case shuttleTile: ShuttleTile => shuttleTile.connectTLSlave(s.regnode, shuttleTile.shuttleParams.tileBeatBytes)
+          case shuttleTile: ShuttleTile => shuttleTile.connectTLSlaveAtTileBeatBytes(s.regnode)
           case _ => t.connectTLSlave(s.regnode, t.xBytes)
         }
       }
