@@ -34,18 +34,6 @@ class WithTraceSinkAlways(targetId: Int = 0) extends Config((site, here, up) => 
           tp.tileParams.traceParams.get.buildSinks :+ (p => (LazyModule(new TraceSinkAlways()(p)), targetId)))))
       )
     }
-    case tp: boom.v3.common.BoomTileAttachParams => {
-      tp.copy(tileParams = tp.tileParams.copy(
-        traceParams = Some(tp.tileParams.traceParams.get.copy(buildSinks = 
-          tp.tileParams.traceParams.get.buildSinks :+ (p => (LazyModule(new TraceSinkAlways()(p)), targetId)))))
-        )
-      }
-    case tp: boom.v4.common.BoomTileAttachParams => {
-      tp.copy(tileParams = tp.tileParams.copy(
-        traceParams = Some(tp.tileParams.traceParams.get.copy(buildSinks = 
-          tp.tileParams.traceParams.get.buildSinks :+ (p => (LazyModule(new TraceSinkAlways()(p)), targetId)))))
-      )
-    }
     case other => other
   }
 })
