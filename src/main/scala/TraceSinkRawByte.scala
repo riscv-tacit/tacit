@@ -70,6 +70,8 @@ trait CanHaveTraceSinkRawByte { this: BaseSubsystem =>
   val TraceSinkRawBytes = hierarchicalSubsystem.totalTiles.values.map { t => t match {
     case r: RocketTile => r.trace_sinks.collect { case r: TraceSinkRawByte => (t, r) }
     case s: ShuttleTile => s.trace_sinks.collect { case r: TraceSinkRawByte => (t, r) }
+    case b: boom.v3.common.BoomTile => b.trace_sinks.collect { case r: TraceSinkRawByte => (t, r) }
+    case b: boom.v4.common.BoomTile => b.trace_sinks.collect { case r: TraceSinkRawByte => (t, r) }
     case _ => Nil
   }}.flatten
   val tacit_bytes = if (TraceSinkRawBytes.nonEmpty) {
