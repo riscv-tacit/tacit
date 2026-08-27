@@ -6,88 +6,7 @@ package tacit
 import chisel3._
 import chisel3.util._
 import freechips.rocketchip.trace._
-
 import org.chipsalliance.cde.config.Parameters
-
-object FullHeaderType extends ChiselEnum {
-  val FTakenBranch    = Value(0x0.U) // 000
-  val FNotTakenBranch = Value(0x1.U) // 001
-  val FUninfJump      = Value(0x2.U) // 010
-  val FInfJump        = Value(0x3.U) // 011
-  val FTrap           = Value(0x4.U) // 100
-  val FSync           = Value(0x5.U) // 101
-  val FValue          = Value(0x6.U) // 110
-  val FReserved       = Value(0x7.U) // 111
-}
-
-object CompressedHeaderType extends ChiselEnum {
-  val CTB = Value(0x0.U) // 00, taken branch
-  val CNT = Value(0x1.U) // 01, not taken branch
-  val CNA = Value(0x2.U) // 10, not a compressed packet
-  val CIJ = Value(0x3.U) // 11, is a jump
-}
-
-object TrapType extends ChiselEnum {
-  val TNone      = Value(0x0.U)
-  val TException = Value(0x1.U)
-  val TInterrupt = Value(0x2.U)
-  val TReturn    = Value(0x4.U)
-}
-
-object SyncType extends ChiselEnum {
-  val SyncNone = Value(0b000.U)
-  val SyncStart = Value(0b001.U)
-  val SyncPeriodic = Value(0b010.U)
-  val SyncEnd = Value(0b011.U)
-}
-
-object HeaderByte {
-  def from_trap_type(header_type: FullHeaderType.Type, trap_type: TrapType.Type): UInt = {
-    Cat(
-      trap_type.asUInt,
-      header_type.asUInt,
-      CompressedHeaderType.CNA.asUInt
-    )
-  }
-
-  def from_sync_type(header_type: FullHeaderType.Type, sync_type: SyncType.Type): UInt = {
-    Cat(
-      sync_type.asUInt,
-      header_type.asUInt,
-      CompressedHeaderType.CNA.asUInt
-    )
-  }
-
-  def apply(header_type: FullHeaderType.Type): UInt = {
-    Cat(
-      0.U(3.W),
-      header_type.asUInt,
-      CompressedHeaderType.CNA.asUInt
-    )
-  }
-}
-
-trait MetaDataWidthHelper {
-  // abstract parameter
-  val coreParams: TraceCoreParams
-  def getMaxNumBytes(width: Int): Int = { width/(8-1) + 1 }
-  lazy val maxASIdBits = coreParams.xlen match {
-    case 32 => 9
-    case 64 => 16
-  }
-  lazy val addrMaxNumBytes = getMaxNumBytes(coreParams.iaddrWidth)
-  lazy val timeMaxNumBytes = getMaxNumBytes(coreParams.xlen)
-  lazy val ctxMaxNumBytes = getMaxNumBytes(maxASIdBits)
-}
-
-class MetaDataBundle(val coreParams: TraceCoreParams) extends Bundle with MetaDataWidthHelper {
-  val prv = UInt(1.W)
-  val ctx = UInt(ctxMaxNumBytes.W)
-  val target_addr = UInt(addrMaxNumBytes.W)
-  val trap_addr = UInt(addrMaxNumBytes.W)
-  val time = UInt(timeMaxNumBytes.W)
-  val is_compressed = UInt(1.W)
-}
 
 class TacitEncoder(override val coreParams: TraceCoreParams, val bufferDepth: Int, val coreStages: Int, val bpParams: TacitBPParams)(implicit p: Parameters) 
     extends LazyTraceEncoder(coreParams)(p) {
@@ -179,7 +98,14 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   trace_packetizer.io.metadata <> metadata_buffer.io.deq
   trace_packetizer.io.prv <> prv_buffer.io.deq
   trace_packetizer.io.ctx <> ctx_buffer.io.deq
-  trace_packetizer.io.out <> io.out
+
+  // low performance compliance, only use one lane
+  io.out.bits := VecInit.fill(TraceEgressConstants.numLanes)(0.U(8.W))
+  io.out.mask := VecInit.fill(TraceEgressConstants.numLanes)(false.B)
+  io.out.bits(0) := trace_packetizer.io.out.bits
+  io.out.mask(0) := trace_packetizer.io.out.valid
+  io.out.valid := trace_packetizer.io.out.valid
+  trace_packetizer.io.out.ready := io.out.ready
 
   // intermediate encoder control signals
   val encode_trap_addr_valid = Wire(Bool())
@@ -194,7 +120,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   metadata.trap_addr := trap_addr_encoder.io.output_num_bytes
   metadata.target_addr := target_addr_encoder.io.output_num_bytes
   metadata.time := time_encoder.io.output_num_bytes
-  metadata.is_compressed := is_compressed
+  metadata.is_full := ~is_compressed
 
   metadata_buffer.io.enq.bits := metadata
   metadata_buffer.io.enq.valid := packet_valid
@@ -312,7 +238,7 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
       // 2 bits for bp mode, 6 bits for n_entries
       runtime_cfg := Cat(log2Ceil(outer.bpParams.n_entries/64).U, io.control.bp_mode(1,0))
       trap_addr_encoder.io.input_value := runtime_cfg
-      encode_trap_addr_valid := sync_type === SyncType.SyncStart
+      encode_trap_addr_valid := true.B
       // context
       ctx_encoder.io.input_value := ingress_0.ctx
       encode_ctx_valid := true.B

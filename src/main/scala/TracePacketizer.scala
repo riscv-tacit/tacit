@@ -2,7 +2,7 @@ package tacit
 
 import chisel3._
 import chisel3.util._
-import freechips.rocketchip.trace.TraceCoreParams
+import freechips.rocketchip.trace.{TraceCoreParams, TraceEgressConstants, TraceEgressInterface}
 
 // slice packets into bytes TODO: is this efficient?
 class TracePacketizer(val coreParams: TraceCoreParams) extends Module with MetaDataWidthHelper {
@@ -55,9 +55,9 @@ class TracePacketizer(val coreParams: TraceCoreParams) extends Module with MetaD
     prv_index := 0.U
     prv_num_bytes := Mux(io.metadata.fire, io.metadata.bits.prv, 0.U)
     header_index := 0.U
-    header_num_bytes := Mux(io.metadata.fire, ~io.metadata.bits.is_compressed, 0.U)
+    header_num_bytes := Mux(io.metadata.fire, io.metadata.bits.is_full, 0.U)
     state := Mux(io.metadata.fire, 
-      Mux(io.metadata.bits.is_compressed.asBool, pComp, pFull),
+      Mux(io.metadata.bits.is_full.asBool, pFull, pComp),
       pIdle
     )
   }
@@ -72,13 +72,13 @@ class TracePacketizer(val coreParams: TraceCoreParams) extends Module with MetaD
         target_addr_index := 0.U
         time_num_bytes := io.metadata.bits.time
         time_index := 0.U
-        header_num_bytes := ~io.metadata.bits.is_compressed
+        header_num_bytes := io.metadata.bits.is_full
         header_index := 0.U
         prv_num_bytes := io.metadata.bits.prv
         prv_index := 0.U
         ctx_num_bytes := io.metadata.bits.ctx
         ctx_index := 0.U
-        state := Mux(io.metadata.bits.is_compressed.asBool, pComp, pFull)
+        state := Mux(io.metadata.bits.is_full.asBool, pFull, pComp)
       }
     }
     is (pComp) {
@@ -135,4 +135,109 @@ class TracePacketizer(val coreParams: TraceCoreParams) extends Module with MetaD
       }
     }
   }
+}
+
+class TraceMaskedPacketizer(val coreParams: TraceCoreParams) extends Module with MetaDataWidthHelper {
+  private val numLanes = TraceEgressConstants.numLanes
+  val io = IO(new Bundle {
+    val message = Flipped(Decoupled(new MessagePacketBundle(coreParams)))
+    val byte = Flipped(Decoupled(UInt(8.W)))
+    val metadata = Flipped(Decoupled(new MetaDataBundle(coreParams)))
+    val out = new TraceEgressInterface()
+  })
+
+  val pIdle :: pComp :: pFull :: Nil = Enum(3)
+  val state = RegInit(pIdle)
+
+  val metadata_mask_reg = Reg(UInt(metaDataBundleWidth.W))
+
+  io.out.valid := false.B
+  io.metadata.ready := false.B
+  io.message.ready := false.B
+  io.byte.ready := false.B
+  io.out.bits := VecInit.fill(numLanes)(0.U(8.W))
+  io.out.mask := VecInit.fill(numLanes)(false.B)
+
+  def prep_next_state(): Unit = {
+    io.metadata.ready := true.B
+    state := Mux(io.metadata.fire, 
+      Mux(io.metadata.bits.is_full.asBool, pFull, pComp),
+      pIdle
+    )
+  }
+
+  io.byte.ready := false.B
+  io.message.ready := false.B
+  io.metadata.ready := false.B
+  when (io.metadata.fire) { metadata_mask_reg := io.metadata.bits.asUInt }
+
+  switch (state) {
+    is (pIdle) {
+      io.metadata.ready := true.B
+      when (io.metadata.fire) {
+        state := Mux(io.metadata.bits.is_full.asBool, pFull, pComp)
+      }
+    }
+    is (pComp) {
+      io.byte.ready := io.out.ready
+      io.out.valid := io.byte.valid
+      // only use the first byte for now
+      io.out.bits(0) := io.byte.bits
+      io.out.mask(0) := io.byte.valid
+      when (io.byte.fire) {
+        io.metadata.ready := true.B
+        prep_next_state()
+      }
+    }
+    is (pFull) {
+      when (metadata_mask_reg =/= 0.U) {
+        val payloadBytes = Wire(Vec(metaDataBundleWidth, UInt(8.W)))
+        payloadBytes := VecInit(Seq.fill(metaDataBundleWidth)(0.U(8.W)))
+        payloadBytes(0) := io.byte.bits
+        payloadBytes(1) := io.message.bits.prv
+        for (i <- 0 until ctxMaxNumBytes) {
+          payloadBytes(2 + i) := io.message.bits.ctx(i)
+        }
+        for (i <- 0 until addrMaxNumBytes) {
+          payloadBytes(2 + ctxMaxNumBytes + i) := io.message.bits.trap_addr(i)
+        }
+        for (i <- 0 until addrMaxNumBytes) {
+          payloadBytes(2 + ctxMaxNumBytes + addrMaxNumBytes + i) := io.message.bits.target_addr(i)
+        }
+        for (i <- 0 until timeMaxNumBytes) {
+          payloadBytes(2 + ctxMaxNumBytes + 2*addrMaxNumBytes + i) := io.message.bits.time(i)
+        }
+
+        val laneValid = Wire(Vec(numLanes, Bool()))
+        val laneIdx = Wire(Vec(numLanes, UInt(log2Ceil(metaDataBundleWidth).W)))
+        val laneMask = Wire(Vec(numLanes + 1, UInt(metaDataBundleWidth.W)))
+
+        laneMask(0) := metadata_mask_reg
+        for (i <- 0 until numLanes) {
+          laneValid(i) := laneMask(i) =/= 0.U
+          laneIdx(i) := PriorityEncoder(laneMask(i))
+          laneMask(i + 1) := Mux(laneValid(i), laneMask(i) & ~(1.U << laneIdx(i)), laneMask(i))
+        }
+
+        val needByte = laneValid.zip(laneIdx).map { case (v, idx) => v && idx === 0.U }.reduce(_||_)
+        val needMessage = laneValid.zip(laneIdx).map { case (v, idx) => v && idx =/= 0.U }.reduce(_||_)
+        val canSend = laneValid(0) && (!needByte || io.byte.valid) && (!needMessage || io.message.valid)
+
+        io.out.valid := canSend
+        io.out.mask := VecInit(laneValid.map(_ && canSend))
+
+        for (i <- 0 until numLanes) {
+          io.out.bits(i) := payloadBytes(laneIdx(i))
+        }
+
+        metadata_mask_reg := Mux(io.out.fire, laneMask(numLanes), metadata_mask_reg)
+      } .otherwise {
+        io.out.valid := false.B // FIXME: there's always a hiccup here?
+        io.byte.ready := true.B // dequeue the header byte
+        io.message.ready := true.B // dequeue the message
+        prep_next_state()
+      }
+    }
+  }
+
 }
