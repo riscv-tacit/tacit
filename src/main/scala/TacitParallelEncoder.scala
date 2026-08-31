@@ -31,8 +31,15 @@ class TacitParallelEncoder(
   // queues size their stall reserve as stallQuiescenceCycles x this bound and
   // assert the bound every cycle.
   val maxPacketsPerCycle: Option[Int] = None,
+  // Lossy mode hysteresis: after a Pause, Resume only once the packet queues
+  // hold at most this many entries. Resuming as soon as one slot frees would
+  // flap, and each Pause/Resume pair costs more bytes than the data it brackets.
+  val resumeWatermark: Int = -1,
 )(implicit p: Parameters)
     extends LazyTraceEncoder(coreParams)(p) {
+  val resumeWatermarkEntries: Int = if (resumeWatermark < 0) bufferDepth / 4 else resumeWatermark
+  require(resumeWatermarkEntries >= 0 && resumeWatermarkEntries < bufferDepth,
+    s"resumeWatermark=$resumeWatermarkEntries must be in [0, bufferDepth=$bufferDepth)")
   override lazy val module = new TacitParallelEncoderModule(this)
 }
 
@@ -42,11 +49,23 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
   val MAX_DELTA_TIME_COMP = 0x3F // 63, 6 bits
 
   // states
-  val sIdle :: sStall :: sSync :: sData :: Nil = Enum(4)
+  //   sPausePending: a group was dropped; its Pause is latched and waits for queue space
+  //   sPaused:       inside a gap, everything is dropped until the low watermark
+  //   sSync:         emitting Start / End / Resume, bound to ingress_0 (sync_type selects)
+  val sIdle :: sPausePending :: sPaused :: sSync :: sData :: Nil = Enum(5)
   val state = RegInit(sIdle)
   val sync_type = RegInit(SyncType.SyncNone)
   val encode_sync = Wire(Bool())
   val prev_time = Reg(UInt(coreParams.xlen.W))
+  val lossy = io.control.lossy
+
+  // Pause binding, latched from ingress_1 in the cycle its group is dropped
+  val pause_pc = Reg(UInt(coreParams.iaddrWidth.W))
+  val pause_time = Reg(UInt(coreParams.xlen.W))
+  val pause_prv = Reg(UInt(4.W))
+  val pause_ctx = Reg(UInt(coreParams.xlen.W))
+  // packets discarded since the Pause (saturating); reported in Resume's trap_addr
+  val dropped = RegInit(0.U(32.W))
 
   // pipeline of ingress data
   val ingress_0 = RegInit(0.U.asTypeOf(new TraceCoreInterface(coreParams)))
@@ -83,8 +102,13 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
   // for the legacy count threshold, not a cycle count.)
   // Legacy impls derive io.stall from count instead and never honor the reserve,
   // so don't let it constrain their elaboration (e.g. stress configs with tiny buffers).
+  // +1: the queue's stall is computed from occupancy at the start of the cycle,
+  // before that cycle's enqueue lands, so with exactly stallQuiescenceCycles worth
+  // free it stays low one cycle too long and lets one more group commit. That group
+  // is not lost (it waits in ingress_1 while the core is stalled) but the reserve
+  // contract is only met if the threshold is one enqueue-cycle higher.
   val bufferReserveCycles = outer.queueImpl match {
-    case MPQueueImpl.SRAM => outer.stallQuiescenceCycles
+    case MPQueueImpl.SRAM => outer.stallQuiescenceCycles + 1
     case _ => 0
   }
   val metadata_buffer = MultiPortedQueue(new MetaDataBundle(coreParams), outer.bufferDepth, coreParams.nGroups, outer.queueImpl, bufferReserveCycles, outer.maxPacketsPerCycle)
@@ -120,17 +144,61 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
                           header_buffer.io.enqs(0).ready &&                                                                                                                                                                                                                                                                                                             
                           message_packet_buffer.io.enqs(0).ready 
 
+  // ---------------- lossy mode ----------------
+  // Which ingress_1 slots carry a packet (lane compaction packs by iretire, not by message).
+  val ingress_1_msg_mask = VecInit(ingress_1.group.map(g => g.iretire === 1.U && g.itype =/= TraceItype.ITNothing))
+  val ingress_1_has_message = ingress_1_msg_mask.asUInt.orR
+  val ingress_1_msg_idx = PriorityEncoder(ingress_1_msg_mask)
+  val ingress_1_msg_count = PopCount(ingress_1_msg_mask)
+
+  // Drop decision: the group in ingress_1 has packets that cannot enqueue now.
+  // No reserve is needed (unlike stall, which must absorb in-flight traffic):
+  // the decision takes effect this cycle and the Pause itself waits for space.
+  val lossy_drop = state === sData && io.control.enable && lossy &&
+                   ingress_1_has_message && !sent && !all_buffers_ready
+  val low_wm = metadata_buffer.io.count <= outer.resumeWatermarkEntries.U
+
+  // A group is lost when it leaves ingress_1 un-encoded: in the drop cycle, while
+  // the Pause is pending, inside the gap, and while Resume is being emitted (that
+  // group is older than the Resume bind point). Each group leaves exactly once.
+  val resuming = state === sSync && sync_type === SyncType.SyncResume
+  val drop_now = pipeline_advance && (lossy_drop || state === sPausePending || state === sPaused || resuming)
+  val dropped_inc = Mux(drop_now, ingress_1_msg_count, 0.U)
+  val dropped_sum = dropped +& dropped_inc
+  val dropped_sat = Mux(dropped_sum(32), ~0.U(32.W), dropped_sum(31, 0))
+  // Resume may enqueue before the ingress_1 group leaves; it will be dropped, count it.
+  val dropped_for_packet = (dropped +& Mux(ingress_1_has_message, ingress_1_msg_count, 0.U))
+  val dropped_for_packet_sat = Mux(dropped_for_packet(32), ~0.U(32.W), dropped_for_packet(31, 0))
+
+  // Sync payload: Start/End/Resume bind to ingress_0 (next covered group);
+  // Pause binds to the latched lost group.
+  val pausing = state === sPausePending
+  val sync_type_now = Mux(pausing, SyncType.SyncPause, sync_type)
+  val sync_pc = Mux(pausing, pause_pc, ingress_0.group(0).iaddr)
+  val sync_prv = Mux(pausing, pause_prv, ingress_0.priv)
+  val sync_ctx = Mux(pausing, pause_ctx, ingress_0.ctx)
+  val sync_trap_addr = Wire(UInt(coreParams.iaddrWidth.W))
+  sync_trap_addr := Mux(resuming, dropped_for_packet_sat, 0.U) // Start's runtime_cfg is 0 for this encoder
+
+  val sync_enq_fire = metadata_buffer.io.enqs(0).fire
+
   for (i <- 0 until coreParams.nGroups) {
     val message_encoder = Module(new MessageEncoder(coreParams, canEncodeSyncMessage = i == 0, my_index = i))
     if (i == 0) { 
       message_encoder.io.encode_sync.get := encode_sync 
-      message_encoder.io.sync_type.get := sync_type
-      message_encoder.io.sync_ingress.get := ingress_0 
+      message_encoder.io.sync_type.get := sync_type_now
+      message_encoder.io.sync_pc.get := sync_pc
+      message_encoder.io.sync_prv.get := sync_prv
+      message_encoder.io.sync_ctx.get := sync_ctx
+      message_encoder.io.sync_trap_addr.get := sync_trap_addr
     }
     message_encoder.io.ingress := ingress_1 // pass in all groups, irrelevant ones will be optimized out
     message_encoder.io.ingress_0_target_addr_msg := ingress_0.group(0).iaddr // backup in case this is the last valid ingress
     message_encoder.io.target_prv_msg := ingress_0.priv
-    message_encoder.io.ingress_valid := ingress_1.group(i).iretire === 1.U && (if (i==0) (state === sData || state === sSync) else (state === sData))
+    // Data packets only in sData. Lane 0 additionally carries every sync
+    // (Start/End/Resume in sSync, Pause in sPausePending) via encode_sync.
+    message_encoder.io.ingress_valid := ingress_1.group(i).iretire === 1.U &&
+      (if (i==0) (state === sData || state === sSync || state === sPausePending) else (state === sData))
 
     metadata_enq_bits(i) := message_encoder.io.metadata
     metadata_enq_bits(i).time := Mux(is_first_valid(i), time_encoder.io.output_mask, 1.U)
@@ -164,10 +232,11 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
   when (do_enq) { prev_time := ingress_1.time }
 
   // default values
-  encode_sync := state === sSync
+  encode_sync := state === sSync || pausing
   time_encoder.io.input_valid := false.B
   time_encoder.io.input_value := DontCare
-  
+  dropped := dropped_sat
+
   switch (state) {
     is (sIdle) {
       when (io.control.enable) {
@@ -179,31 +248,89 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
       time_encoder.io.input_value := ingress_0.time
       time_encoder.io.input_valid := true.B
       prev_time := ingress_0.time
-      state := Mux(pipeline_advance && (sent || metadata_buffer.io.enqs.map(_.fire).reduce(_ || _)), Mux(io.control.enable, sData, sIdle), sSync)
+      when (pipeline_advance && (sent || sync_enq_fire)) {
+        when (io.control.enable) {
+          state := sData
+        } .elsewhen (sync_type === SyncType.SyncResume) {
+          // disabled while paused: Resume then End, never End directly after Pause
+          state := sSync
+          sync_type := SyncType.SyncEnd
+        } .otherwise {
+          state := sIdle
+        }
+        when (sync_type === SyncType.SyncResume) { dropped := 0.U }
+      }
     }
     is (sData) {
+      // Data packets are still encoded from ingress_1 in the cycle disable is
+      // observed, so the time field must be driven unconditionally here (it
+      // used to sit under .otherwise, producing a time-less packet at disable).
+      time_encoder.io.input_value := delta_time
+      time_encoder.io.input_valid := true.B
       when (!io.control.enable) {
-        state := Mux(pipeline_advance, sSync, sData)
-        sync_type := SyncType.SyncEnd
-      } .otherwise {
-        time_encoder.io.input_value := delta_time
-        time_encoder.io.input_valid := true.B
+        // Leave for End only once the group in ingress_1 has been encoded (or has
+        // nothing to encode): with a full queue at disable time it may still be
+        // waiting, and sSync would otherwise discard it. In lossless mode the core
+        // is stalled meanwhile, so no further group arrives.
+        when (pipeline_advance && (sent || !ingress_1_has_message)) {
+          state := sSync
+          sync_type := SyncType.SyncEnd
+        }
+      } .elsewhen (lossy_drop) {
+        pause_pc := ingress_1.group(ingress_1_msg_idx).iaddr
+        pause_time := ingress_1.time
+        pause_prv := ingress_1.priv
+        pause_ctx := ingress_1.ctx
+        state := sPausePending
+      }
+    }
+    is (sPausePending) {
+      time_encoder.io.input_value := pause_time
+      time_encoder.io.input_valid := true.B
+      when (sync_enq_fire) { state := sPaused }
+    }
+    is (sPaused) {
+      when (low_wm) {
+        state := sSync
+        sync_type := SyncType.SyncResume
       }
     }
   }
+
+  // Lossless mode must never lose a group: a packet-bearing group leaving ingress_1
+  // un-encoded means the stall reserve was insufficient for the core's quiescence.
+  val group_enqueued_now = metadata_buffer.io.enqs.map(_.fire).reduce(_ || _)
+  assert(!(state === sData && io.control.enable && !lossy && pipeline_advance &&
+           ingress_1_has_message && !sent && !group_enqueued_now && !all_buffers_ready),
+    "lossless mode: retire group left ingress_1 without being encoded (stall reserve too small)")
+  assert(!(state === sData && io.control.enable && !lossy && pipeline_advance &&
+           ingress_1_has_message && !sent && !group_enqueued_now && all_buffers_ready),
+    "lossless mode: retire group left ingress_1 without being encoded although the queues were ready")
+
+  // software contract: lossy is written before enable and never flipped mid-run
+  assert(state === sIdle || lossy === RegNext(lossy), "control.lossy changed while the encoder is active")
+  assert(!(state === sPaused && metadata_buffer.io.enqs.map(_.fire).reduce(_ || _)), "enqueue inside a gap")
+  assert(!(lossy && io.stall), "stall asserted to the core in lossy mode")
+
+  val stall = Wire(Bool())
   outer.queueImpl match {
     case MPQueueImpl.SRAM =>
-      io.stall := metadata_buffer.io.stall ||
-                  message_packet_buffer.io.stall ||
-                  header_buffer.io.stall
+      stall := metadata_buffer.io.stall ||
+               message_packet_buffer.io.stall ||
+               header_buffer.io.stall
     case _ =>
       // legacy stall policy, preserved verbatim so existing configs/bitstreams
       // (e.g. ongoing TraceDoctor experiments) elaborate unchanged
       def stallThreshold(count: UInt) = count >= (outer.bufferDepth - outer.coreStages).U
-      io.stall := stallThreshold(metadata_buffer.io.count) ||
-                  stallThreshold(message_packet_buffer.io.count) ||
-                  stallThreshold(header_buffer.io.count)
+      stall := stallThreshold(metadata_buffer.io.count) ||
+               stallThreshold(message_packet_buffer.io.count) ||
+               stallThreshold(header_buffer.io.count)
   }
+  io.stall := stall && !lossy
+  io.perf.full := stall // in lossy mode: cycles the core would have been stalled
+  io.perf.paused := state === sPausePending || state === sPaused
+  io.perf.pause_fire := pausing && sync_enq_fire
+  io.perf.dropped_inc := dropped_inc
 }
 
 class MessageEncoder(
@@ -213,8 +340,13 @@ class MessageEncoder(
 ) extends Module with MetaDataWidthHelper {
   val io = IO(new Bundle {
     val encode_sync = if (canEncodeSyncMessage) Some(Input(Bool())) else None
-    val sync_ingress = if (canEncodeSyncMessage) Some(Input(new TraceCoreInterface(coreParams))) else None
     val sync_type = if (canEncodeSyncMessage) Some(Input(SyncType())) else None
+    // sync payload, bound by the parent (ingress_0 for Start/End/Resume, latched group for Pause)
+    val sync_pc = if (canEncodeSyncMessage) Some(Input(UInt(coreParams.iaddrWidth.W))) else None
+    val sync_prv = if (canEncodeSyncMessage) Some(Input(UInt(4.W))) else None
+    val sync_ctx = if (canEncodeSyncMessage) Some(Input(UInt(coreParams.xlen.W))) else None
+    // trap_addr position: runtime_cfg (Start), 0 (End, Pause), dropped packets (Resume)
+    val sync_trap_addr = if (canEncodeSyncMessage) Some(Input(UInt(coreParams.iaddrWidth.W))) else None
     val ingress = Input(new TraceCoreInterface(coreParams))
     val ingress_0_target_addr_msg = Input(UInt(coreParams.iaddrWidth.W))
     val target_prv_msg = Input(UInt(4.W))
@@ -369,17 +501,14 @@ class MessageEncoder(
     when (io.encode_sync.get) {
       io.packet_valid := true.B
       header_byte := HeaderByte.from_sync_type(FullHeaderType.FSync, io.sync_type.get)
-      target_addr_encoder.io.input_value := io.sync_ingress.get.group(my_index).iaddr >> 1.U
+      target_addr_encoder.io.input_value := io.sync_pc.get >> 1.U
       encode_target_addr_valid := true.B
       prv_encoder.io.from_priv := 0b00.U
-      prv_encoder.io.to_priv := io.sync_ingress.get.priv
+      prv_encoder.io.to_priv := io.sync_prv.get
       encode_prv_valid := true.B
-      // reuse trap address for runtime_cfg
-      val runtime_cfg = 0.U(7.W)
-      // 2 bits for bp mode, 6 bits for n_entries
-      trap_addr_encoder.io.input_value := runtime_cfg
+      trap_addr_encoder.io.input_value := io.sync_trap_addr.get
       encode_trap_addr_valid := true.B
-      ctx_encoder.io.input_value := io.sync_ingress.get.ctx
+      ctx_encoder.io.input_value := io.sync_ctx.get
       encode_ctx_valid := true.B
       possible_to_compress := false.B
     }

@@ -36,6 +36,9 @@ object SyncType extends ChiselEnum {
   val SyncStart = Value(0b001.U)
   val SyncPeriodic = Value(0b010.U)
   val SyncEnd = Value(0b011.U)
+  // lossy mode (see software/tacit_decoder/docs/packet-format.md section 9)
+  val SyncPause = Value(0b100.U)   // binds to the first lost message; trap_addr = 0
+  val SyncResume = Value(0b101.U)  // binds to the next covered group; trap_addr = dropped packets
 }
 
 object HeaderByte {

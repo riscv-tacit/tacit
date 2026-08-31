@@ -241,6 +241,28 @@ class TacitMegaBoomV3SRAMQueueRawByteConfig extends Config(
   new chipyard.config.WithSystemBusWidth(128) ++
   new chipyard.config.AbstractConfig)
 
+// Lossy-mode integration testing: MegaBoom with the SRAM queue and a sink that
+// only accepts 1 cycle in 4 (target 3). The arbiter monitor captures the byte
+// stream upstream of the sinks, so the throttled run is still decodable from
+// trace_monitor_boom_tile_0.encoded.trace.
+class TacitMegaBoomV3BackpressureConfig extends Config(
+  new tacit.WithTraceSinkBackpressure(3) ++ // pattern via +tacit_bp_* plusargs; default: ready 1 cycle in 4
+  new tacit.WithTraceSinkRawByte(2) ++
+  new tacit.WithTraceSinkDMA(1) ++
+  new tacit.WithTraceSinkAlways(0) ++
+  new chipyard.config.WithTraceArbiterMonitor ++
+  new chipyard.WithTacitEncoder(tacit.MPQueueImpl.SRAM) ++
+  new chipyard.config.WithAsidLen(16) ++
+  new boom.v3.common.WithNMegaBooms(1) ++
+  new chipyard.config.WithSystemBusWidth(128) ++
+  new chipyard.config.AbstractConfig)
+
+// Same as TacitMegaBoomV3BackpressureConfig with BOOM's commit log printf, for
+// debugging sim hangs (+verbose shows every committed instruction).
+class TacitMegaBoomV3BackpressurePrintfConfig extends Config(
+  new boom.v3.common.WithBoomCommitLogPrintf ++
+  new TacitMegaBoomV3BackpressureConfig)
+
 class TacitMegaBoomV3PrefetchRoCCRawByteConfig extends Config(
   new tacit.WithTraceSinkRawByte(2) ++
   new tacit.WithTraceSinkDMA(1) ++

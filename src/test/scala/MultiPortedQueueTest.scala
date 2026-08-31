@@ -641,4 +641,40 @@ class MultiPortedQueueTest extends AnyFlatSpec with ChiselScalatestTester {
       assert(result == expectedValues, s"FIFO ordering violated in reg wrapper stress test")
     }
   }
+
+  it should "preserve FIFO order in the SRAM queue when driven to full occupancy" in {
+    // Random enqueue at full width whenever the queue accepts, slow random drain, so
+    // occupancy sits at numEntries most of the time. Every dequeued value must match
+    // the enqueue sequence exactly (no loss, no duplication, no reordering).
+    test(new MultiPortedSRAMQueue(UInt(16.W), numEntries = 16, numInputs = 2, reserveCycles = 0))
+      .withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+      c.clock.setTimeout(0)
+      val rng = new scala.util.Random(17)
+      val sent = ArrayBuffer[Int]()
+      val got = ArrayBuffer[Int]()
+      var next = 1
+      var maxCount = 0
+      for (i <- 0 until 2) { c.io.enqs(i).valid.poke(false.B) }
+      c.io.deq.ready.poke(false.B)
+      for (cyc <- 0 until 6000) {
+        val deqReady = rng.nextInt(5) == 0
+        c.io.deq.ready.poke(deqReady.B)
+        val n = if (cyc < 5000) rng.nextInt(3) else 0   // 0..2 lanes, then drain
+        for (i <- 0 until 2) {
+          c.io.enqs(i).valid.poke((i < n).B)
+          c.io.enqs(i).bits.poke((next + i).U)
+        }
+        // sample fires before the edge
+        val ready = c.io.enqs(0).ready.peek().litToBoolean
+        if (ready) { for (i <- 0 until n) sent += next + i; next += n }
+        if (deqReady && c.io.deq.valid.peek().litToBoolean) got += c.io.deq.bits.peek().litValue.toInt
+        maxCount = math.max(maxCount, c.io.count.peek().litValue.toInt)
+        c.clock.step()
+      }
+      println(s"SRAM queue full-occupancy test: sent ${sent.length}, got ${got.length}, max count $maxCount")
+      assert(maxCount == 16, s"test did not reach full occupancy (max $maxCount)")
+      assert(got.toSeq == sent.take(got.length).toSeq,
+        s"FIFO order violated at index ${got.zip(sent).indexWhere { case (a, b) => a != b }}")
+    }
+  }
 }
