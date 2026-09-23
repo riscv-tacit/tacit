@@ -65,6 +65,8 @@ class TacitParallelEncoderTest extends AnyFlatSpec with ChiselScalatestTester {
     c.io.control.target.poke(0.U)
     c.io.control.bp_mode.poke(0.U)
     c.io.control.lossy.poke(false.B)
+    c.io.control.resume_watermark.poke(0.U)  // 0 = elaboration default
+    c.io.control.drop_threshold.poke(0.U)    // 0 = physical bound
   }
 
   /** Sample egress bytes this cycle (call BEFORE clock.step). */
@@ -511,6 +513,176 @@ class TacitParallelEncoderTest extends AnyFlatSpec with ChiselScalatestTester {
       val tail = pkts.takeRight(2).map(_.kind)
       assert(tail == Seq("Resume", "End"), s"expected ... Resume End, got ${pkts.map(_.kind).mkString(" ")}")
       println(s"Disable-while-paused: ${pkts.map(_.kind).mkString(" ")}")
+    }
+  }
+
+  /* bufferDepth 16, nGroups 2 -> enqBound 2, dropThreshold 14, default wm 4. */
+  private val dropThreshold = 16 - nGroups
+  private val defaultWm = 16 / 4
+
+  it should "never discard a group while perf.paused is low" in {
+    // drop_now and io.perf.paused must come from the same predicate. They used to
+    // disagree -- four terms against two -- so groups discarded on the lossy_drop
+    // cycle and throughout the Resume phase were invisible to gap_cycles, which
+    // undercounted every gap. Any such cycle fails this test.
+    test(new TacitParallelEncoderHarness(params, bufferDepth = 16, coreStages = 5))
+      .withAnnotations(noVcd) { c =>
+      init(c)
+      c.io.control.lossy.poke(true.B)
+      c.io.control.enable.poke(true.B)
+      c.io.out.ready.poke(false.B)          // sink blocked: force sustained overflow
+      var droppedCycles, pausedCycles, violations, totalDropped = 0
+      var time = 100L
+      for (_ <- 0 until 600) {
+        for (i <- 0 until nGroups) {
+          c.io.in.group(i).iretire.poke(1.U)
+          c.io.in.group(i).itype.poke(TraceItype.ITBrTaken)
+          c.io.in.group(i).iaddr.poke((0x1000 + time * 4).U)
+        }
+        c.io.in.time.poke(time.U)
+        val paused = c.io.perf.paused.peek().litToBoolean
+        val inc = c.io.perf.dropped_inc.peek().litValue.toInt
+        if (inc > 0) {
+          droppedCycles += 1
+          totalDropped += inc
+          if (!paused) violations += 1
+        }
+        if (paused) pausedCycles += 1
+        c.clock.step()
+        time += 1
+      }
+      println(s"in_gap invariant: $droppedCycles drop cycles, $pausedCycles paused cycles, " +
+              s"$totalDropped groups dropped, $violations violations")
+      assert(droppedCycles > 0, "stimulus never dropped anything; test is vacuous")
+      assert(violations == 0, s"$violations cycles discarded a group while perf.paused was low")
+    }
+  }
+
+  it should "apply and clamp the programmable resume watermark" in {
+    test(new TacitParallelEncoderHarness(params, bufferDepth = 16, coreStages = 5))
+      .withAnnotations(noVcd) { c =>
+      init(c)
+      def eff = c.io.perf.resume_watermark_eff.peek().litValue.toInt
+      c.io.control.resume_watermark.poke(0.U)
+      assert(eff == defaultWm, s"0 must select the elaboration default $defaultWm, got $eff")
+      c.io.control.resume_watermark.poke(7.U)
+      assert(eff == 7, s"in-range value must pass through, got $eff")
+      c.io.control.resume_watermark.poke((dropThreshold - 1).U)
+      assert(eff == dropThreshold - 1, s"max legal value must pass through, got $eff")
+      // At or above the drop threshold a gap would end on the cycle it began.
+      c.io.control.resume_watermark.poke(dropThreshold.U)
+      assert(eff == dropThreshold - 1, s"value at the threshold must clamp, got $eff")
+      c.io.control.resume_watermark.poke("hffffffff".U(32.W))
+      assert(eff == dropThreshold - 1,
+        s"all-ones must read back this build's maximum ${dropThreshold - 1}, got $eff")
+      println(s"watermark: default=$defaultWm max=${dropThreshold - 1}, clamping verified")
+    }
+  }
+
+  it should "shorten gaps when the resume watermark is raised" in {
+    // Gap length is headroom/drain-rate, so raising the watermark must shorten
+    // every gap and (the burst being unchanged) produce more of them.
+    def run(wm: Int): (Int, Double) = {
+      var gaps = 0
+      var meanDur = 0.0
+      test(new TacitParallelEncoderHarness(params, bufferDepth = 16, coreStages = 5))
+        .withAnnotations(noVcd) { c =>
+        init(c)
+        val bytes = ArrayBuffer[Int](); val groups = ArrayBuffer[Group]()
+        val rng = new scala.util.Random(11)
+        c.io.control.lossy.poke(true.B)
+        c.io.control.resume_watermark.poke(wm.U)
+        c.io.control.enable.poke(true.B)
+        for (_ <- 0 until 3) idleAndSample(c, bytes)
+        val t = driveRandom(c, bytes, groups, rng, n = 3000, readyProb = 0.2, lossy = true, startTime = 100)
+        disableAndDrain(c, bytes, groups, t, 4000)
+        val pkts = parsePackets(bytes.toSeq)
+        checkGolden(pkts, groups.toSeq)
+        val durs = ArrayBuffer[Long]()
+        var pauseTs = -1L
+        pkts.foreach {
+          case sp: SyncPkt if sp.kind == "Pause"  => pauseTs = sp.time
+          case sp: SyncPkt if sp.kind == "Resume" && pauseTs >= 0 =>
+            durs += sp.time - pauseTs; pauseTs = -1L
+          case _ =>
+        }
+        gaps = durs.length
+        meanDur = if (durs.isEmpty) 0.0 else durs.sum.toDouble / durs.length
+      }
+      (gaps, meanDur)
+    }
+    val (lowGaps, lowDur) = run(defaultWm)
+    val (highGaps, highDur) = run(dropThreshold - 2)
+    println(f"wm=$defaultWm%d: $lowGaps%d gaps, mean $lowDur%.1f cycles | " +
+            f"wm=${dropThreshold - 2}%d: $highGaps%d gaps, mean $highDur%.1f cycles")
+    assert(lowGaps > 0 && highGaps > 0, "both configurations must produce gaps")
+    assert(highDur < lowDur, s"raising the watermark must shorten gaps ($highDur vs $lowDur)")
+  }
+
+  it should "emulate a shallower queue via the drop threshold" in {
+    // The depth sweep rests on this: with the threshold set low, occupancy never
+    // reaches the physical bound, so a deep build must behave as a shallow one.
+    // Gap length is (threshold - watermark)/drain, so halving the headroom must
+    // halve the mean gap.
+    def run(thresh: Int, wm: Int): (Int, Double, Int) = {
+      var gaps = 0; var meanDur = 0.0; var maxOcc = 0
+      test(new TacitParallelEncoderHarness(params, bufferDepth = 16, coreStages = 5))
+        .withAnnotations(noVcd) { c =>
+        init(c)
+        val bytes = ArrayBuffer[Int](); val groups = ArrayBuffer[Group]()
+        val rng = new scala.util.Random(11)
+        c.io.control.lossy.poke(true.B)
+        c.io.control.drop_threshold.poke(thresh.U)
+        c.io.control.resume_watermark.poke(wm.U)
+        c.io.control.enable.poke(true.B)
+        assert(c.io.perf.drop_threshold_eff.peek().litValue.toInt == thresh,
+          s"threshold $thresh must be applied verbatim")
+        for (_ <- 0 until 3) idleAndSample(c, bytes)
+        val t = driveRandom(c, bytes, groups, rng, n = 3000, readyProb = 0.2, lossy = true, startTime = 100)
+        disableAndDrain(c, bytes, groups, t, 4000)
+        val pkts = parsePackets(bytes.toSeq)
+        checkGolden(pkts, groups.toSeq)
+        val durs = ArrayBuffer[Long](); var pauseTs = -1L
+        pkts.foreach {
+          case sp: SyncPkt if sp.kind == "Pause"  => pauseTs = sp.time
+          case sp: SyncPkt if sp.kind == "Resume" && pauseTs >= 0 =>
+            durs += sp.time - pauseTs; pauseTs = -1L
+          case _ =>
+        }
+        gaps = durs.length
+        meanDur = if (durs.isEmpty) 0.0 else durs.sum.toDouble / durs.length
+      }
+      (gaps, meanDur, maxOcc)
+    }
+    // physical dropThreshold is 14; emulate 12 and 6 with proportional watermarks
+    val (gDeep, dDeep, _) = run(12, 3)
+    val (gShallow, dShallow, _) = run(6, 1)
+    println(f"emulated depth: thresh=12 wm=3 -> $gDeep%d gaps, mean $dDeep%.1f | " +
+            f"thresh=6 wm=1 -> $gShallow%d gaps, mean $dShallow%.1f")
+    assert(gDeep > 0 && gShallow > 0, "both configurations must gap")
+    assert(gShallow > gDeep, s"a shallower emulated queue must gap more often ($gShallow vs $gDeep)")
+    assert(dShallow < dDeep, s"a shallower emulated queue must gap for less time ($dShallow vs $dDeep)")
+  }
+
+  it should "clamp the drop threshold to the physical bound and pull the watermark below it" in {
+    test(new TacitParallelEncoderHarness(params, bufferDepth = 16, coreStages = 5))
+      .withAnnotations(noVcd) { c =>
+      init(c)
+      def th = c.io.perf.drop_threshold_eff.peek().litValue.toInt
+      def wm = c.io.perf.resume_watermark_eff.peek().litValue.toInt
+      c.io.control.drop_threshold.poke(0.U)
+      assert(th == dropThreshold, s"0 must select the physical bound $dropThreshold, got $th")
+      // cannot claim entries that do not exist
+      c.io.control.drop_threshold.poke((dropThreshold + 50).U)
+      assert(th == dropThreshold, s"over-range must clamp to $dropThreshold, got $th")
+      // emulating a shallow queue must drag the watermark below the new threshold,
+      // or every gap would end on the cycle it began
+      c.io.control.drop_threshold.poke(6.U)
+      c.io.control.resume_watermark.poke(0.U)          // default is 4, still < 6
+      assert(th == 6 && wm == 4, s"expected thresh 6 / wm 4, got $th / $wm")
+      c.io.control.resume_watermark.poke(9.U)          // above the emulated threshold
+      assert(wm == 5, s"watermark must clamp to thresh-1 = 5, got $wm")
+      println(s"threshold clamping verified: physical=$dropThreshold, emulated=6 pulls wm to $wm")
     }
   }
 }

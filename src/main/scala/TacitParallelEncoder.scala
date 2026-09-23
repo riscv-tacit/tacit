@@ -40,6 +40,17 @@ class TacitParallelEncoder(
   val resumeWatermarkEntries: Int = if (resumeWatermark < 0) bufferDepth / 4 else resumeWatermark
   require(resumeWatermarkEntries >= 0 && resumeWatermarkEntries < bufferDepth,
     s"resumeWatermark=$resumeWatermarkEntries must be in [0, bufferDepth=$bufferDepth)")
+  // Occupancy above which a packet-bearing group can no longer be admitted, i.e.
+  // where lossy mode starts dropping. Mirrors the queue's can_accept bound.
+  // The runtime watermark is clamped below this: at or above it a gap would end
+  // on the cycle it began.
+  val dropThresholdEntries: Int = bufferDepth - maxPacketsPerCycle.getOrElse(coreParams.nGroups)
+  require(dropThresholdEntries >= 1,
+    s"bufferDepth=$bufferDepth leaves no room above the enqueue bound " +
+    s"${maxPacketsPerCycle.getOrElse(coreParams.nGroups)}")
+  require(resumeWatermarkEntries < dropThresholdEntries,
+    s"resumeWatermark=$resumeWatermarkEntries must sit below the drop threshold " +
+    s"$dropThresholdEntries, else a gap ends on the cycle it begins")
   override lazy val module = new TacitParallelEncoderModule(this)
 }
 
@@ -150,25 +161,62 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
   val ingress_1_has_message = ingress_1_msg_mask.asUInt.orR
   val ingress_1_msg_idx = PriorityEncoder(ingress_1_msg_mask)
   val ingress_1_msg_count = PopCount(ingress_1_msg_mask)
+  // Every retired slot, message-carrying or not. Perf accounting only: these are
+  // lost with the group but never had a packet to drop, so they are deliberately
+  // absent from dropped_inc and from the Resume payload.
+  val ingress_1_insn_count = PopCount(ingress_1.group.map(_.iretire === 1.U))
 
-  // Drop decision: the group in ingress_1 has packets that cannot enqueue now.
+  // Drop decision. NOTE the enqueue valids below are gated on !lossy_drop: with a
+  // programmable threshold the queue may still have physical room on the cycle we
+  // decide to drop, so without that gate the group would be enqueued AND counted
+  // as dropped. Before the threshold existed, !all_buffers_ready made this implicit.
   // No reserve is needed (unlike stall, which must absorb in-flight traffic):
   // the decision takes effect this cycle and the Pause itself waits for space.
+  // Runtime drop threshold, absolute in queue entries. 0 selects the physical
+  // bound so an unprogrammed encoder is unchanged; a lower value emulates a
+  // shallower queue. Clamped to the physical bound -- it can only ever emulate
+  // SMALLER, never claim entries that do not exist, and !all_buffers_ready stays
+  // a hard floor below.
+  val thresh_max = outer.dropThresholdEntries.U
+  val thresh_req = io.control.drop_threshold
+  val thresh_eff = Mux(thresh_req === 0.U || thresh_req > thresh_max, thresh_max, thresh_req)
+  io.perf.drop_threshold_eff := thresh_eff
+  val over_threshold = metadata_buffer.io.count > thresh_eff
+
   val lossy_drop = state === sData && io.control.enable && lossy &&
-                   ingress_1_has_message && !sent && !all_buffers_ready
-  val low_wm = metadata_buffer.io.count <= outer.resumeWatermarkEntries.U
+                   ingress_1_has_message && !sent &&
+                   (!all_buffers_ready || over_threshold)
+  // Runtime resume watermark, absolute in queue entries. 0 selects the
+  // elaboration default so an unprogrammed encoder is unchanged; anything at or
+  // above the drop threshold is clamped, since resuming there would end the gap
+  // on the cycle it started and emit a Pause/Resume pair per dropped group.
+  // Clamping rather than asserting: this register is software-writable, and a
+  // synthesized assertion would turn a driver typo into a dead simulation.
+  val wm_max = thresh_eff - 1.U
+  val wm_req = io.control.resume_watermark
+  val wm_sel = Mux(wm_req === 0.U, outer.resumeWatermarkEntries.U, wm_req)
+  val resume_wm = Mux(wm_sel > wm_max, wm_max, wm_sel)
+  val low_wm = metadata_buffer.io.count <= resume_wm
 
   // A group is lost when it leaves ingress_1 un-encoded: in the drop cycle, while
   // the Pause is pending, inside the gap, and while Resume is being emitted (that
   // group is older than the Resume bind point). Each group leaves exactly once.
   val resuming = state === sSync && sync_type === SyncType.SyncResume
-  val drop_now = pipeline_advance && (lossy_drop || state === sPausePending || state === sPaused || resuming)
+  // Single source of truth for "the encoder is blind this cycle". drop_now and
+  // io.perf.paused MUST come from the same expression: they previously carried
+  // four terms and two respectively, so gap_cycles omitted both the lossy_drop
+  // cycle and the entire Resume phase -- cycles in which groups were being
+  // discarded -- and undercounted every gap.
+  val in_gap = lossy_drop || state === sPausePending || state === sPaused || resuming
+  val drop_now = pipeline_advance && in_gap
   val dropped_inc = Mux(drop_now, ingress_1_msg_count, 0.U)
   val dropped_sum = dropped +& dropped_inc
   val dropped_sat = Mux(dropped_sum(32), ~0.U(32.W), dropped_sum(31, 0))
   // Resume may enqueue before the ingress_1 group leaves; it will be dropped, count it.
   val dropped_for_packet = (dropped +& Mux(ingress_1_has_message, ingress_1_msg_count, 0.U))
   val dropped_for_packet_sat = Mux(dropped_for_packet(32), ~0.U(32.W), dropped_for_packet(31, 0))
+  // Perf only: same drop_now predicate, wider mask. Feeds no packet field.
+  val dropped_insns_inc = Mux(drop_now, ingress_1_insn_count, 0.U)
 
   // Sync payload: Start/End/Resume bind to ingress_0 (next covered group);
   // Pause binds to the latched lost group.
@@ -206,18 +254,18 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
     val is_compressed = message_encoder.io.possible_to_compress && time_can_be_compressed
     metadata_enq_bits(i).is_full := ~is_compressed
     metadata_buffer.io.enqs(i).bits := metadata_enq_bits(i)
-    metadata_buffer.io.enqs(i).valid := message_encoder.io.packet_valid && !sent && all_buffers_ready
+    metadata_buffer.io.enqs(i).valid := message_encoder.io.packet_valid && !sent && all_buffers_ready && !lossy_drop
 
     message_packet_enq_bits(i) := message_encoder.io.message
     val zero_varlen_bytes = VecInit.fill(time_encoder.maxNumBytes)(0.U(8.W))
     zero_varlen_bytes(0) := 0x80.U(8.W) // signify a varlen encoded zero
     message_packet_enq_bits(i).time := Mux(is_first_valid(i), time_encoder.io.output_bytes, zero_varlen_bytes)
     message_packet_buffer.io.enqs(i).bits := message_packet_enq_bits(i)
-    message_packet_buffer.io.enqs(i).valid := message_encoder.io.packet_valid && !is_compressed && !sent && all_buffers_ready
+    message_packet_buffer.io.enqs(i).valid := message_encoder.io.packet_valid && !is_compressed && !sent && all_buffers_ready && !lossy_drop
 
     val compressed_packet = Cat(Mux(is_first_valid(i), delta_time(5,0), 0.U(6.W)), message_encoder.io.comp_header)
     header_buffer.io.enqs(i).bits := Mux(is_compressed, compressed_packet, message_encoder.io.full_header)
-    header_buffer.io.enqs(i).valid := message_encoder.io.packet_valid && !sent && all_buffers_ready
+    header_buffer.io.enqs(i).valid := message_encoder.io.packet_valid && !sent && all_buffers_ready && !lossy_drop
   }
 
   for (i <- 0 until coreParams.nGroups) {
@@ -328,9 +376,11 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
   }
   io.stall := stall && !lossy
   io.perf.full := stall // in lossy mode: cycles the core would have been stalled
-  io.perf.paused := state === sPausePending || state === sPaused
+  io.perf.paused := in_gap
   io.perf.pause_fire := pausing && sync_enq_fire
   io.perf.dropped_inc := dropped_inc
+  io.perf.dropped_insns_inc := dropped_insns_inc
+  io.perf.resume_watermark_eff := resume_wm
 }
 
 class MessageEncoder(
