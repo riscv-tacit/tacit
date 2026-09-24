@@ -218,6 +218,28 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
   // Perf only: same drop_now predicate, wider mask. Feeds no packet field.
   val dropped_insns_inc = Mux(drop_now, ingress_1_insn_count, 0.U)
 
+  // Privilege fields of trap packets. BOOM tags a retire group with RegNext(status.prv):
+  // sret/mret/ecall execute in the CSR unit before they commit, so their groups arrive
+  // already tagged with the NEW privilege, while faults update the CSR after commit and
+  // arrive tagged with the old one. So the next group's tag (ingress_0.priv) is the
+  // trap's target privilege unless that group is itself a trap or return, in which
+  // case its tag is already past its own transition and the current trap group's tag
+  // -- post-transition for the CSR-executed kinds, the only ones that can retire back
+  // to back with another trap -- is the target (2026-09-24: a restarted syscall,
+  // sret straight into the re-executed ecall, produced sret U->S and ecall S->S).
+  // from_priv is the privilege the encoder has tracked since the last sync, advanced
+  // by each trap's target, so the chain of packets is self-consistent whatever the
+  // core's sampling does.
+  def group_has_trap(g: TraceCoreInterface): Bool = g.group.map(x => x.iretire === 1.U &&
+    (x.itype === TraceItype.ITException || x.itype === TraceItype.ITInterrupt || x.itype === TraceItype.ITReturn)).reduce(_ || _)
+  val ingress_1_has_trap = group_has_trap(ingress_1)
+  val ingress_0_has_trap = group_has_trap(ingress_0)
+  val trap_to_prv = Mux(ingress_0_has_trap, ingress_1.priv, ingress_0.priv)
+  val enc_prv = RegInit(3.U(4.W))   // machine mode at reset; every Start/Resume re-seeds it
+  when (pipeline_advance && ingress_1_has_trap) {
+    enc_prv := trap_to_prv          // the transition happened whether or not its packet was encoded
+  }
+
   // Sync payload: Start/End/Resume bind to ingress_0 (next covered group);
   // Pause binds to the latched lost group.
   val pausing = state === sPausePending
@@ -229,6 +251,9 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
   sync_trap_addr := Mux(resuming, dropped_for_packet_sat, 0.U) // Start's runtime_cfg is 0 for this encoder
 
   val sync_enq_fire = metadata_buffer.io.enqs(0).fire
+  when (sync_enq_fire && encode_sync && (sync_type_now === SyncType.SyncStart || sync_type_now === SyncType.SyncResume)) {
+    enc_prv := sync_prv             // the decoder's privilege is whatever the sync declared
+  }
 
   for (i <- 0 until coreParams.nGroups) {
     val message_encoder = Module(new MessageEncoder(coreParams, canEncodeSyncMessage = i == 0, my_index = i))
@@ -242,7 +267,8 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
     }
     message_encoder.io.ingress := ingress_1 // pass in all groups, irrelevant ones will be optimized out
     message_encoder.io.ingress_0_target_addr_msg := ingress_0.group(0).iaddr // backup in case this is the last valid ingress
-    message_encoder.io.target_prv_msg := ingress_0.priv
+    message_encoder.io.target_prv_msg := trap_to_prv
+    message_encoder.io.from_prv_msg := enc_prv
     // Data packets only in sData. Lane 0 additionally carries every sync
     // (Start/End/Resume in sSync, Pause in sPausePending) via encode_sync.
     message_encoder.io.ingress_valid := ingress_1.group(i).iretire === 1.U &&
@@ -400,6 +426,7 @@ class MessageEncoder(
     val ingress = Input(new TraceCoreInterface(coreParams))
     val ingress_0_target_addr_msg = Input(UInt(coreParams.iaddrWidth.W))
     val target_prv_msg = Input(UInt(4.W))
+    val from_prv_msg = Input(UInt(4.W))
     val ingress_valid = Input(Bool())
     val metadata = Output(new MetaDataBundle(coreParams))
     val message = Output(new MessagePacketBundle(coreParams)) 
@@ -514,7 +541,7 @@ class MessageEncoder(
       encode_target_addr_valid := true.B
       trap_addr_encoder.io.input_value := io.ingress.group(my_index).iaddr >> 1.U
       encode_trap_addr_valid := true.B
-      prv_encoder.io.from_priv := io.ingress.priv
+      prv_encoder.io.from_priv := io.from_prv_msg
       prv_encoder.io.to_priv := io.target_prv_msg
       encode_prv_valid := true.B
       possible_to_compress := false.B
@@ -526,7 +553,7 @@ class MessageEncoder(
       encode_target_addr_valid := true.B
       trap_addr_encoder.io.input_value := io.ingress.group(my_index).iaddr >> 1.U
       encode_trap_addr_valid := true.B
-      prv_encoder.io.from_priv := io.ingress.priv
+      prv_encoder.io.from_priv := io.from_prv_msg
       prv_encoder.io.to_priv := io.target_prv_msg
       encode_prv_valid := true.B
       possible_to_compress := false.B
@@ -538,7 +565,7 @@ class MessageEncoder(
       encode_target_addr_valid := true.B
       trap_addr_encoder.io.input_value := io.ingress.group(my_index).iaddr >> 1.U
       encode_trap_addr_valid := true.B
-      prv_encoder.io.from_priv := io.ingress.priv
+      prv_encoder.io.from_priv := io.from_prv_msg
       prv_encoder.io.to_priv := io.target_prv_msg
       encode_prv_valid := true.B
       ctx_encoder.io.input_value := io.ingress.ctx
