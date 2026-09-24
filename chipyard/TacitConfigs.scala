@@ -271,6 +271,21 @@ class TacitMegaBoomV3SRAMQueueDepth32Config  extends TacitMegaBoomV3SRAMQueueDep
 class TacitMegaBoomV3SRAMQueueDepth64Config  extends TacitMegaBoomV3SRAMQueueDepthConfig(64)
 class TacitMegaBoomV3SRAMQueueDepth128Config extends TacitMegaBoomV3SRAMQueueDepthConfig(128)
 
+// Two MegaBooms, each with its own encoder on the depth-64 SRAM queue (the single-core
+// paper design, doubled): for cross-core case studies such as the IPI storm, where the
+// two harts' traces are captured side by side. Same sinks and asid width as the
+// single-core configs so the same driver and decoder flow apply to both traces.
+class TacitDualMegaBoomV3SRAMQueueDepth64Config extends Config(
+  new tacit.WithTraceSinkRawByte(2) ++
+  new tacit.WithTraceSinkDMA(1) ++
+  new tacit.WithTraceSinkAlways(0) ++
+  new chipyard.config.WithTraceArbiterMonitor ++
+  new chipyard.WithTacitEncoder(tacit.MPQueueImpl.SRAM, Some(64)) ++
+  new chipyard.config.WithAsidLen(16) ++
+  new boom.v3.common.WithNMegaBooms(2) ++
+  new chipyard.config.WithSystemBusWidth(128) ++
+  new chipyard.config.AbstractConfig)
+
 // Lossy-mode integration testing: MegaBoom with the SRAM queue and a sink that
 // only accepts 1 cycle in 4 (target 3). The arbiter monitor captures the byte
 // stream upstream of the sinks, so the throttled run is still decodable from
