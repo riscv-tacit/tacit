@@ -222,19 +222,23 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
   // sret/mret/ecall execute in the CSR unit before they commit, so their groups arrive
   // already tagged with the NEW privilege, while faults update the CSR after commit and
   // arrive tagged with the old one. So the next group's tag (ingress_0.priv) is the
-  // trap's target privilege unless that group is itself a trap or return, in which
-  // case its tag is already past its own transition and the current trap group's tag
-  // -- post-transition for the CSR-executed kinds, the only ones that can retire back
-  // to back with another trap -- is the target (2026-09-24: a restarted syscall,
-  // sret straight into the re-executed ecall, produced sret U->S and ecall S->S).
+  // trap's target privilege unless that group is itself a CSR-executed trap (an
+  // exception or return), in which case its tag is already past its own transition
+  // and the current trap group's tag is the target instead. That fallback is right
+  // only when the current trap is CSR-executed too. An interrupt next is excluded:
+  // it is taken before its instruction executes, so its tag is never past its own
+  // transition and ingress_0.priv stays the target. A fault or interrupt followed
+  // directly by an exception can still be mislabeled.
   // from_priv is the privilege the encoder has tracked since the last sync, advanced
   // by each trap's target, so the chain of packets is self-consistent whatever the
   // core's sampling does.
   def group_has_trap(g: TraceCoreInterface): Bool = g.group.map(x => x.iretire === 1.U &&
     (x.itype === TraceItype.ITException || x.itype === TraceItype.ITInterrupt || x.itype === TraceItype.ITReturn)).reduce(_ || _)
+  def group_has_csr_trap(g: TraceCoreInterface): Bool = g.group.map(x => x.iretire === 1.U &&
+    (x.itype === TraceItype.ITException || x.itype === TraceItype.ITReturn)).reduce(_ || _)
   val ingress_1_has_trap = group_has_trap(ingress_1)
-  val ingress_0_has_trap = group_has_trap(ingress_0)
-  val trap_to_prv = Mux(ingress_0_has_trap, ingress_1.priv, ingress_0.priv)
+  val ingress_0_has_csr_trap = group_has_csr_trap(ingress_0)
+  val trap_to_prv = Mux(ingress_0_has_csr_trap, ingress_1.priv, ingress_0.priv)
   val enc_prv = RegInit(3.U(4.W))   // machine mode at reset; every Start/Resume re-seeds it
   when (pipeline_advance && ingress_1_has_trap) {
     enc_prv := trap_to_prv          // the transition happened whether or not its packet was encoded
