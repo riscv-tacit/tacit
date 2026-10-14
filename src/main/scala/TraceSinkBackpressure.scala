@@ -79,18 +79,6 @@ class WithTraceSinkBackpressure(targetId: Int = 3, params: TraceSinkBackpressure
           tp.tileParams.traceParams.get.buildSinks :+ (p => (LazyModule(new TraceSinkBackpressure(params)(p)), targetId)))))
       )
     }
-    case tp: boom.v3.common.BoomTileAttachParams => {
-      tp.copy(tileParams = tp.tileParams.copy(
-        traceParams = Some(tp.tileParams.traceParams.get.copy(buildSinks =
-          tp.tileParams.traceParams.get.buildSinks :+ (p => (LazyModule(new TraceSinkBackpressure(params)(p)), targetId)))))
-      )
-    }
-    case tp: boom.v4.common.BoomTileAttachParams => {
-      tp.copy(tileParams = tp.tileParams.copy(
-        traceParams = Some(tp.tileParams.traceParams.get.copy(buildSinks =
-          tp.tileParams.traceParams.get.buildSinks :+ (p => (LazyModule(new TraceSinkBackpressure(params)(p)), targetId)))))
-      )
-    }
     case other => other
   }
 })
