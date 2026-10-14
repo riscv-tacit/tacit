@@ -105,7 +105,10 @@ class TraceSinkDMA(params: TraceSinkDMAParams, hartId: Int)(implicit p: Paramete
     val sourceGen = Module(new SourceGenerator(edge.bundle.sourceBits))
     val sourceReady = sourceGen.io.id.valid
     val src_ready_stall_count = RegInit(0.U(32.W))
-    when (!sourceReady) {
+    // Only count cycles the sink was actually held up: without the valid
+    // qualifier this also counted idle cycles that merely happened to have no
+    // free source ID, making the count an upper bound on real sink pressure.
+    when (!sourceReady && serialWidthAggregator.io.wide.valid) {
       src_ready_stall_count := src_ready_stall_count + 1.U
     }
     val entering_mWrite = mstate === mIdle && serialWidthAggregator.io.wide.valid &&

@@ -270,6 +270,10 @@ class MultiPortedSRAMQueue[T <: Data](
   val can_accept = total <= (numEntries - enqBound).U
   io.enqs.foreach(_.ready := can_accept)
   io.stall_enq := !can_accept
+  // Early warning from registered occupancy only, so the path into the core's
+  // commit gate stays register-derived. Note the snapshot excludes this cycle's
+  // enqueue: the producer must size reserveCycles as (cycles of traffic still in
+  // flight after stall) + 1, see TacitParallelEncoder.
   io.stall     := (numEntries.U -& total) < (reserveCycles * enqBound).U
   io.count     := total(cntBits - 1, 0)
 

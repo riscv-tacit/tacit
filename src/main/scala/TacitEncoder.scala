@@ -149,6 +149,14 @@ class TacitEncoderModule(outer: TacitEncoder) extends LazyTraceEncoderModule(out
   // technically it should always the byte buffer, but just to be safe
   stall := stallThreshold(trap_addr_buffer.io.count) || stallThreshold(target_addr_buffer.io.count) || stallThreshold(time_buffer.io.count) || stallThreshold(byte_buffer.io.count)
   io.stall := stall
+  io.perf.full := stall
+  io.perf.paused := false.B
+  io.perf.pause_fire := false.B
+  io.perf.dropped_inc := 0.U
+  io.perf.dropped_insns_inc := 0.U
+  // No lossy mode in this encoder; report the watermark as unprogrammed.
+  io.perf.resume_watermark_eff := 0.U
+  io.perf.drop_threshold_eff := 0.U
   
   val sent = RegInit(false.B)
   // reset takes priority over enqueue
