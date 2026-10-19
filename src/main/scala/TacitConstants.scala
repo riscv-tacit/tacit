@@ -31,6 +31,13 @@ object TrapType extends ChiselEnum {
   val TReturn    = Value(0x4.U)
 }
 
+object TacitEncoderConstants {
+  // Upper 28 bits of a Sync Periodic's trap_addr (below them, a 16-bit sequence
+  // number). Fixed by the packet format so decoders can recognize a checkpoint in a
+  // raw byte stream; see packet-format.md.
+  val PeriodicMagic = 0xA5C396E
+}
+
 object SyncType extends ChiselEnum {
   val SyncNone = Value(0b000.U)
   val SyncStart = Value(0b001.U)

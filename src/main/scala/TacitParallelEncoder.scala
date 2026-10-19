@@ -246,16 +246,35 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
 
   // Sync payload: Start/End/Resume bind to ingress_0 (next covered group);
   // Pause binds to the latched lost group.
+  // ---------------- periodic sync ----------------
+  // A Sync Periodic is a checkpoint for decoding a trace whose start was lost (a
+  // DMA ring buffer that wrapped). Once sync_interval bytes have left the encoder
+  // since the last one, it is inserted at the next retire group that carries no
+  // control-flow message: that group's lane 0 is free, every older group is already
+  // enqueued, and the group itself has no events, so nothing is dropped or
+  // reordered and the sync/data state machine is untouched. It binds to that group
+  // (sync_pc = its oldest instruction, time = its retire cycle) and carries
+  // trap_addr = PeriodicMagic << 16 | seq so a decoder can find it in a raw byte
+  // stream (see packet-format.md).
+  val out_bytes = RegInit(0.U(32.W))
+  val periodic_pending = RegInit(false.B)
+  val periodic_seq = RegInit(0.U(16.W))
+  val periodic_now = state === sData && io.control.enable && periodic_pending &&
+                     ingress_1.group(0).iretire === 1.U && !ingress_1_has_message && !sent
+  val periodic_trap_addr = Cat(TacitEncoderConstants.PeriodicMagic.U(28.W), periodic_seq)
+
   val pausing = state === sPausePending
-  val sync_type_now = Mux(pausing, SyncType.SyncPause, sync_type)
-  val sync_pc = Mux(pausing, pause_pc, ingress_0.group(0).iaddr)
-  val sync_prv = Mux(pausing, pause_prv, ingress_0.priv)
-  val sync_ctx = Mux(pausing, pause_ctx, ingress_0.ctx)
+  val sync_type_now = Mux(pausing, SyncType.SyncPause, Mux(periodic_now, SyncType.SyncPeriodic, sync_type))
+  val sync_pc = Mux(pausing, pause_pc, Mux(periodic_now, ingress_1.group(0).iaddr, ingress_0.group(0).iaddr))
+  val sync_prv = Mux(pausing, pause_prv, Mux(periodic_now, ingress_1.priv, ingress_0.priv))
+  val sync_ctx = Mux(pausing, pause_ctx, Mux(periodic_now, ingress_1.ctx, ingress_0.ctx))
   val sync_trap_addr = Wire(UInt(coreParams.iaddrWidth.W))
-  sync_trap_addr := Mux(resuming, dropped_for_packet_sat, 0.U) // Start's runtime_cfg is 0 for this encoder
+  sync_trap_addr := Mux(periodic_now, periodic_trap_addr,
+                    Mux(resuming, dropped_for_packet_sat, 0.U)) // Start's runtime_cfg is 0 for this encoder
 
   val sync_enq_fire = metadata_buffer.io.enqs(0).fire
-  when (sync_enq_fire && encode_sync && (sync_type_now === SyncType.SyncStart || sync_type_now === SyncType.SyncResume)) {
+  when (sync_enq_fire && encode_sync && (sync_type_now === SyncType.SyncStart || sync_type_now === SyncType.SyncResume ||
+                                         sync_type_now === SyncType.SyncPeriodic)) {
     enc_prv := sync_prv             // the decoder's privilege is whatever the sync declared
   }
 
@@ -310,7 +329,7 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
   when (do_enq) { prev_time := ingress_1.time }
 
   // default values
-  encode_sync := state === sSync || pausing
+  encode_sync := state === sSync || pausing || periodic_now
   time_encoder.io.input_valid := false.B
   time_encoder.io.input_value := DontCare
   dropped := dropped_sat
@@ -374,6 +393,29 @@ class TacitParallelEncoderModule(outer: TacitParallelEncoder) extends LazyTraceE
       }
     }
   }
+
+  when (periodic_now) {
+    time_encoder.io.input_value := ingress_1.time // syncs carry absolute time
+  }
+
+  // interval accounting: bytes that left the encoder since the last checkpoint
+  val out_bytes_next = out_bytes +& Mux(io.out.fire, PopCount(io.out.mask), 0.U)
+  out_bytes := Mux(out_bytes_next(32), ~0.U(32.W), out_bytes_next(31, 0))
+  when (io.control.sync_interval =/= 0.U && out_bytes_next >= io.control.sync_interval) {
+    periodic_pending := true.B
+  }
+  when (periodic_now && sync_enq_fire) {
+    periodic_pending := false.B
+    out_bytes := 0.U
+    periodic_seq := periodic_seq + 1.U
+  }
+  when (state === sIdle) { // a new session starts counting from its Start
+    out_bytes := 0.U
+    periodic_pending := false.B
+    periodic_seq := 0.U
+  }
+  assert(!(periodic_now && sync_enq_fire && metadata_buffer.io.enqs.drop(1).map(_.fire).foldLeft(false.B)(_ || _)),
+    "periodic sync shares its cycle with a data packet")
 
   // Lossless mode must never lose a group: a packet-bearing group leaving ingress_1
   // un-encoded means the stall reserve was insufficient for the core's quiescence.
